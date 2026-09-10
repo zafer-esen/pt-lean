@@ -1,5 +1,3 @@
-# lean-pt
-
 A Lean checker for calculational proofs and program verification.
 
 The tool works by translating each calculation to a Lean proof term. The [step checker](PT/Step.lean) tries the referenced rules in either direction and at different positions.
