@@ -1331,6 +1331,9 @@ def failMessage (mv : Move) (f : Fail) (probe : Option LocalDecl → Expr → Ta
   if implication && !isImp then
     match f.kind with
     | .noMatch | .open_ =>
+      if pt.equalityOnly.get (← getOptions) then
+        return m!"`{X}` is an implication. " ++
+          m!"Use it as a formula in the step `(A ⇒ B) = T`"
       return m!"`{X}` is an implication, it justifies a `⇒` step, or as a formula the step `(A ⇒ B) = T`"
     | _ => pure ()
   match f.kind with

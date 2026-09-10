@@ -156,6 +156,8 @@ def relaxedOptions : CommandElabM Bool := do
   let mut chain : Option (Term × Bool) := none
   for st in steps do
     let isEq := st.getKind == ``ptStepEq
+    if !isEq && pt.equalityOnly.get (← getOptions) then
+      throwErrorAt st[0] "`⇒` steps are disabled. Use only `=` steps in calculations"
     let raw := st[2][0].getAtomVal
     let hintTxt := raw.trimAscii.toString
     -- Preserve hint positions for hover and go-to-definition.
