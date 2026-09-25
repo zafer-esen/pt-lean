@@ -296,7 +296,7 @@ def closeStep (arith : Bool := true) : TacticM Bool := do
         let h ← mkAppM ``Iff.trans #[← mkAppM ``Iff.of_eq #[pa], ← mkAppM ``Iff.trans #[g', ← mkAppM ``Iff.of_eq #[← mkEqSymm pb]]]
         if ty.isAppOfArity ``PT.Imp 2 then mkAppM ``PT.Imp.of_iff #[h] else pure h
     goal.assign pf
-    setGoals [g'.mvarId!]
+    replaceMainGoal [g'.mvarId!]
     if ← closeByRfl then return true
     if ← closeByAC then return true
     throwError "not closed"
