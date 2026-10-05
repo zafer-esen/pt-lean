@@ -35,8 +35,6 @@ def reduceFields (e : Expr) : MetaM Expr := do
     let some (.ctorInfo _) := e.appArg!.getAppFn.constName?.bind env.find? | return .done e
     return .done (← whnfR e))
 
-/-- A formula as the student would write it. Fields of a state record are reduced, and
-positional projections become field names. -/
 def displayForm (e : Expr) : MetaM Expr := do
   let env ← getEnv
   let e ← Core.betaReduce (← instantiateMVars e)
@@ -1308,7 +1306,7 @@ def applyHere (mv : Move) (srcs : Array Src) (close : Option (TacticM Bool)) (sc
       s.restore
       worst := some ((mkFail .noPosition).better worst)
   for src in srcs do
-    -- Build the variants once. Each attempt restores the assignments it makes.
+    -- Build the variants once.
     let vs ← try src.make catch _ => pure #[]
     let nv := vs.size
     let info : Array (Bool × Bool) := vs.map fun p =>

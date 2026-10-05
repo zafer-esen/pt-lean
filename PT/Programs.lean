@@ -157,6 +157,16 @@ theorem DefinitionOfAbort (R : Pred St) (s : St) : wp .abort R s ↔ F := Iff.rf
 -- 9.1
 theorem DefinitionOfSequentialComposition (S₁ S₂ : Cmd St) (R : Pred St) (s : St) :
     wp (.seq S₁ S₂) R s ↔ wp S₁ (wp S₂ R) s := Iff.rfl
+theorem DefinitionOfSequentialComposition.split2 (S₁ S₂ S₃ : Cmd St) (R : Pred St) (s : St) :
+    wp (.seq S₁ (.seq S₂ S₃)) R s ↔ wp (.seq S₁ S₂) (wp S₃ R) s := Iff.rfl
+theorem DefinitionOfSequentialComposition.split3 (S₁ S₂ S₃ S₄ : Cmd St) (R : Pred St) (s : St) :
+    wp (.seq S₁ (.seq S₂ (.seq S₃ S₄))) R s ↔ wp (.seq S₁ (.seq S₂ S₃)) (wp S₄ R) s := Iff.rfl
+theorem DefinitionOfSequentialComposition.split4 (S₁ S₂ S₃ S₄ S₅ : Cmd St) (R : Pred St) (s : St) :
+    wp (.seq S₁ (.seq S₂ (.seq S₃ (.seq S₄ S₅)))) R s ↔
+      wp (.seq S₁ (.seq S₂ (.seq S₃ S₄))) (wp S₅ R) s := Iff.rfl
+theorem DefinitionOfSequentialComposition.split5 (S₁ S₂ S₃ S₄ S₅ S₆ : Cmd St) (R : Pred St) (s : St) :
+    wp (.seq S₁ (.seq S₂ (.seq S₃ (.seq S₄ (.seq S₅ S₆))))) R s ↔
+      wp (.seq S₁ (.seq S₂ (.seq S₃ (.seq S₄ S₅)))) (wp S₆ R) s := Iff.rfl
 -- 10.1, 10.2
 theorem DefinitionOfAssignment (f : St → St) (R : Pred St) (s : St) :
     wp (.assign f) R s ↔ R (f s) := Iff.rfl
