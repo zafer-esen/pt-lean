@@ -11,6 +11,8 @@ syntax ptAnnot := "{" ident " : " ptf "}"
 syntax (name := programCmd) "program " ident ptAnnot (ptcmd)?
   "{" &"inv" ident " : " ptf "}" "{" &"bound" ident " : " ptf "}"
   ptLoop (ptcmd)? ptAnnot : command
+syntax (name := programIfCmd) "program " ident ptAnnot
+  "if " ptGuard ((" □ " <|> " | ") ptGuard)* &"fi" ptAnnot : command
 
 def obligations (init : Option (TSyntax `ptcmd)) (Q P t : TSyntax `ptf)
     (guards : Array (TSyntax `ptf × TSyntax `ptcmd)) (fin : Option (TSyntax `ptcmd))
@@ -32,6 +34,15 @@ def obligations (init : Option (TSyntax `ptcmd)) (Q P t : TSyntax `ptf)
   for (B, S) in guards, i in [1:guards.size + 1] do
     out := out.push (if one then "dec" else s!"dec{i}",
       ← `(ptf| ($P) ∧ ($B) ⇒ wp($save:ptcmd; $S:ptcmd, $t < $t1)))
+  return out
+
+/-- The Alternative Command Theorem. -/
+def ifObligations (Q R : TSyntax `ptf) (guards : Array (TSyntax `ptf × TSyntax `ptcmd)) :
+    MacroM (Array (String × TSyntax `ptf)) := do
+  let BB ← guards[1:].foldlM (init := guards[0]!.1) fun acc (B, _) => `(ptf| $acc ∨ $B)
+  let mut out := #[("guards", ← `(ptf| ($Q) ⇒ ($BB)))]
+  for (B, S) in guards, i in [1:guards.size + 1] do
+    out := out.push (s!"branch{i}", ← `(ptf| ($Q) ∧ ($B) ⇒ wp($S:ptcmd, $R:ptf)))
   return out
 
 private partial def savedBoundUse? (env : Environment) (stx : Syntax) : Option Syntax :=
@@ -73,6 +84,19 @@ private partial def savedBoundUse? (env : Environment) (stx : Syntax) : Option S
 
     elabCommand (← `(def $(mkIdent (n.getId ++ `ob)) ($(mkIdent `σ) : $(mkIdent `St)) : Prop := ⟪$f⟫))
 
+@[command_elab programIfCmd] def elabProgramIf : CommandElab := fun stx => do
+  if stx.hasMissing then return
+  let name : Ident := ⟨stx[1]⟩
+  let Q : TSyntax `ptf := ⟨stx[2][3]⟩
+  let guards : Array (TSyntax `ptf × TSyntax `ptcmd) :=
+    (#[stx[4]] ++ stx[5].getArgs.map (·[1])).map fun g => (⟨g[0]⟩, ⟨g[2]⟩)
+  let R : TSyntax `ptf := ⟨stx[7][3]⟩
+  if (← liftTermElabM stateName?).isNone then
+    throwErrorAt name "declare the program variables with `state` first"
+  for (ob, f) in ← liftMacroM (ifObligations Q R guards) do
+    let n := mkIdent (name.getId ++ Name.mkSimple ob)
+    elabCommand (← `(def $(mkIdent (n.getId ++ `ob)) ($(mkIdent `σ) : $(mkIdent `St)) : Prop := ⟪$f⟫))
+
 /-- Generated obligations in appendix order. -/
 def obligationsOf (env : Environment) (name : Name) : Array Name := Id.run do
   let mut out := #[]
@@ -82,7 +106,7 @@ def obligationsOf (env : Environment) (name : Name) : Array Name := Id.run do
     let s := n.getString!
     let base := String.ofList (s.toList.takeWhile Char.isAlpha)
     let num := (String.ofList (s.toList.dropWhile Char.isAlpha)).toNat?.getD 0
-    10 * (["init", "inv", "post", "bound", "dec"].idxOf? base |>.getD 9) + num
+    10 * (["guards", "branch", "init", "inv", "post", "bound", "dec"].idxOf? base |>.getD 9) + num
   return out.qsort fun a b => rank a < rank b
 
 def obligationLines (name : Name) : CommandElabM (Array MessageData) := do
@@ -97,8 +121,10 @@ def obligationLines (name : Name) : CommandElabM (Array MessageData) := do
   return out
 
 private def resolveProgramRef (id : Syntax) : CommandElabM Name := do
-  let ob ← resolveProofRef (mkIdentFrom id (id.getId ++ `init.ob))
-  return ob.getPrefix.getPrefix
+  for first in [`init, `guards] do
+    let ob ← resolveProofRef (mkIdentFrom id (id.getId ++ first ++ `ob))
+    if (← getEnv).contains ob then return ob.getPrefix.getPrefix
+  return id.getId
 
 syntax (name := obligationsCmd) "obligations " ident : command
 @[command_elab obligationsCmd] def elabObligations : CommandElab := fun stx => do

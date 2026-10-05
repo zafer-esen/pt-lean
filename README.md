@@ -75,6 +75,8 @@ obligations countdown
 
 For the iterative command, `obligations` lists the proof goals. These need separate proofs named as listed, e.g.,`proof countdown.init : …`. `verified countdown` checks all goals.
 
+A `program` can also be a single alternative command `if … fi` between `{Q : …}` and `{R : …}`. Its goals are those of the Alternative Command Theorem, named `guards`, `branch1`, `branch2`, and so on.
+
 The generated decrease obligations use `t1 : Int` to save the bound. (Do not use `t1` in program code or in annotations.)
 
 ## Other

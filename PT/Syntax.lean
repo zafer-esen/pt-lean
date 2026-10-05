@@ -130,6 +130,22 @@ def relaxedOptions : CommandElabM Bool := do
   let stmt : TSyntax `ptf := ⟨stripParens stmt⟩
   let assumptions : Array (TSyntax `ptf) :=
     if stx[5].getNumArgs > 0 then stx[5][0][1].getSepArgs.map (⟨·⟩) else #[]
+  if let some n := name? then
+    let fullName := (← getCurrNamespace) ++ n.getId
+    let ob := fullName ++ `ob
+    if (← getEnv).contains ob then
+      let some stName := stName? | throwError "no `state` declared"
+      let ok ← liftTermElabM do
+        Term.withAutoBoundImplicit <| Meta.withLocalDeclD `σ (mkConst stName) fun σ => do
+          let e ← Term.elabTerm (← `(⟪$stmt⟫)) (some (mkSort .zero))
+          Term.synthesizeSyntheticMVarsNoPostponing
+          let e ← instantiateMVars e
+
+          if ← (try Meta.isDefEq e (mkApp (mkConst ob) σ) catch _ => pure false) then return true
+          let some v := ((← getEnv).find? ob).bind (·.value?) | return false
+          return acNorm e == acNorm (← Meta.instantiateLambda v #[σ])
+      unless ok do
+        throwErrorAt stx[4] "this is not the obligation `{fullName}` of `program`"
   let steps := stx[7].getArgs
 
   if stx[6].getNumArgs == 0 && !steps.isEmpty then
@@ -192,22 +208,6 @@ def relaxedOptions : CommandElabM Bool := do
     if assumptions.isEmpty then `(by pt_conclude $qa $qb $chainTerm)
     else `(by pt_assume [$assumeT,*]; pt_conclude $qa $qb $chainTerm)
 
-  if let some n := name? then
-    let fullName := (← getCurrNamespace) ++ n.getId
-    let ob := fullName ++ `ob
-    if (← getEnv).contains ob then
-      let some stName := stName? | throwError "no `state` declared"
-      let ok ← liftTermElabM do
-        Term.withAutoBoundImplicit <| Meta.withLocalDeclD `σ (mkConst stName) fun σ => do
-          let e ← Term.elabTerm (← `(⟪$stmt⟫)) (some (mkSort .zero))
-          Term.synthesizeSyntheticMVarsNoPostponing
-          let e ← instantiateMVars e
-
-          if ← (try Meta.isDefEq e (mkApp (mkConst ob) σ) catch _ => pure false) then return true
-          let some v := ((← getEnv).find? ob).bind (·.value?) | return false
-          return acNorm e == acNorm (← Meta.instantiateLambda v #[σ])
-      unless ok do
-        throwErrorAt stx[4] "this is not the obligation `{fullName}` of `program`"
   let cmd ← match name? with
     | some n =>
       if relaxed then `(@[pt_proof, pt_relaxed] theorem $n:ident $binders* : $stmtT := $body)
