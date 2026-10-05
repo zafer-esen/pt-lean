@@ -35,6 +35,25 @@ def reduceFields (e : Expr) : MetaM Expr := do
     let some (.ctorInfo _) := e.appArg!.getAppFn.constName?.bind env.find? | return .done e
     return .done (← whnfR e))
 
+/-- A formula as the student would write it. Fields of a state record are reduced, and
+positional projections become field names. -/
+def displayForm (e : Expr) : MetaM Expr := do
+  let env ← getEnv
+  let e ← Core.betaReduce (← instantiateMVars e)
+  Meta.transform e (post := fun e => do
+    if let .proj st i x := e then
+      let some f := (getStructureInfo? env st).bind (·.fieldNames[i]?) | return .done e
+      let some pf := getProjFnForField? env st f | return .done e
+      return .visit (mkApp (mkConst pf) x)
+    let .const n _ := e.getAppFn | return .done e
+    let some info := env.getProjectionFnInfo? n | return .done e
+    let args := e.getAppArgs
+    let k := info.numParams + 1
+    unless args.size ≥ k do return .done e
+    let some (.ctorInfo _) := args[k - 1]!.getAppFn.constName?.bind env.find? | return .done e
+    let v ← whnfR (mkAppN e.getAppFn (args.extract 0 k))
+    return .visit (mkAppN v (args.extract k args.size)))
+
 def lawApp (e : Expr) (args : Array Expr) (ty : Expr) : MetaM Expr := do
   let e := mkAppN e args
   if (← instantiateMVars (← inferType e)) == ty then return e
@@ -404,6 +423,8 @@ structure Fail where
   line : Expr
   next : Expr
   kind : FailKind
+  /-- The context of `line` and `next`, which may be inside a quantifier or `wp`. -/
+  lctx : Option LocalContext := none
 
   flipped : Bool := false
 
@@ -931,7 +952,7 @@ def notOneLaw (text : String) (f : Expr) (cited : List (String × Expr)) (assume
     if let some msg ← redundantPart body assumed needed then
       return some (m!"the arithmetic fact `{text}` is two facts, " ++ msg)
     if !arithShape body then
-      return some m!"the arithmetic fact `{text}` is not one law of arithmetic: a relation, an equation between relations or their conjunctions and disjunctions, or an implication from relations to a relation, as in appendix 4. Its other connectives are for the laws"
+      return some m!"the arithmetic fact `{text}` is not one law of arithmetic: a relation, an equation between relations or their conjunctions and disjunctions, or an implication from relations to a relation, as in appendix 4. Handle its other connectives with the laws of logic, in steps of their own"
 
     let citedF := cited.map (·.2)
     let conj (fs : List Expr) : Expr := match fs with
@@ -1021,6 +1042,8 @@ structure Move where
   deriving Inhabited
 
 def lawStatement (c : Name) : MetaM String := do
+  if c == ``PT.DefinitionOfAssignment then
+    return "wp(x := e, R) = R with e substituted for x, and likewise for x₁, x₂ := e₁, e₂"
   let some ci := (← getEnv).find? c | return toString c
   forallTelescope ci.type fun _ body => do
     let body := match body.app2? ``PT.Imp with
@@ -1052,6 +1075,34 @@ structure Src where
   name : String
   make : MetaM (Array (Expr × Expr))
   schema : Bool := false
+  /-- An implication used as the formula `(X ⇒ Y) = T` may match `X` and `Y` up to grouping. -/
+  regroup : Bool := false
+
+/-- Regroupings of an `∨` or `∧` chain with one operand first or last, e.g., `q ∨ (p ∨ r)` as
+`p ∨ (q ∨ r)` and `(q ∨ r) ∨ p`. -/
+def pivots (e : Expr) : Array Expr := Id.run do
+  let some op := [``Or, ``And].find? (e.isAppOfArity · 2) | return #[]
+  let rec flat (fuel : Nat) (e : Expr) : Array Expr :=
+    match fuel, e.app2? op with
+    | fuel + 1, some (a, b) => flat fuel a ++ flat fuel b
+    | _, _ => #[e]
+  let xs := flat 64 e
+  let chain (ys : Array Expr) : Expr :=
+    ys.pop.foldr (fun x acc => mkApp2 (mkConst op) x acc) ys.back!
+  let mut out := #[]
+  for i in [0:xs.size] do
+    let rest := chain ((xs.toList.eraseIdx i).toArray)
+    out := out.push (mkApp2 (mkConst op) xs[i]! rest) |>.push (mkApp2 (mkConst op) rest xs[i]!)
+  return out
+
+/-- Regroupings of both sides of an implication. -/
+def impRegroupings (u : Expr) : Array Expr := Id.run do
+  let some (x, y) := u.app2? ``PT.Imp | return #[]
+  let mut out := #[]
+  for x' in #[x] ++ pivots x do
+    for y' in #[y] ++ pivots y do
+      unless x' == x && y' == y do out := out.push (mkApp2 (mkConst ``PT.Imp) x' y')
+  return out
 
 def Src.descr (src : Src) : Option Expr → MessageData
   | some u => m!"{src.name} applied to `{u}`"
@@ -1103,7 +1154,7 @@ def sourcesOf (mv : Move) (isImp : Bool) : TacticM (Array Src) := do
     | .imp =>
       -- an implication in an `=` step is the formula `(X ⇒ Y) = T`
       unless isImp do
-        out := out.push { name := s!"`{mv.item}`", make := do
+        out := out.push { name := s!"`{mv.item}`", regroup := true, make := do
           let e ← mkConstWithFreshMVarLevels c
           let (args, ty) ← lawTelescope e
           (← impVariants (← lawApp e args ty) ty).mapM fun v => do
@@ -1134,17 +1185,42 @@ def sourcesOf (mv : Move) (isImp : Bool) : TacticM (Array Src) := do
   return out
 
 /-- Try one variant and direction. `inNext` requires its result in the next line. -/
-def attempt (src : Src) (i : Nat) (symm : Bool) (u? : Option Expr) (a : Expr)
+def attempt (src : Src) (vs : Array (Expr × Expr)) (i : Nat) (symm : Bool) (u? : Option Expr) (a : Expr)
     (subsB : Array Expr) (occs : Occurrences) (inNext : Bool) (sc : Scope)
     (close : Option (TacticM Bool)) : TacticM (Option FailKind) := do
   let s ← saveState
   let fail (f : FailKind) : TacticM (Option FailKind) := do s.restore; return some f
   try
-    let vs ← src.make
     let some (v, vty) := vs[i]? | return ← fail .noMatch
     let some (l, r) := (vty.iff? <|> (vty.eq?.map fun (_, x, y) => (x, y))) | return ← fail .noMatch
     let (pat, res) := if symm then (r, l) else (l, r)
-    let pat ← instantiateMVars pat
+    let mut pat ← instantiateMVars pat
+    let mut v := v
+    -- Match the implication up to grouping, then rewrite `u` through the regrouping.
+    if let (some u, true, false) := (u?, src.regroup, symm) then
+      let direct ← do
+        let s' ← saveState
+        let r ← isDefEq pat u
+        s'.restore
+        pure r
+      unless direct do
+        for u' in impRegroupings u do
+          let s' ← saveState
+          if ← isDefEq pat u' then
+            let h ← mkFreshExprMVar (mkApp2 (mkConst ``Iff) u u')
+            let ok ← try
+                let gs ← getGoals
+                setGoals [h.mvarId!]
+                evalTactic (← `(tactic| pt_ac))
+                let done := (← getUnsolvedGoals).isEmpty
+                setGoals gs
+                pure done
+              catch _ => pure false
+            if ok then
+              v := mkApp5 (mkConst ``Iff.trans) u u' (mkConst ``PT.T) (← instantiateMVars h) v
+              pat := u
+              break
+          s'.restore
     if src.schema then
       let some t := u? | return ← fail .noMatch
       unless ← schemaInstance v pat a t do return ← fail .noMatch
@@ -1191,7 +1267,8 @@ def applyHere (mv : Move) (srcs : Array Src) (close : Option (TacticM Bool)) (sc
   let isImp := goalTy.isAppOfArity ``PT.Imp 2
   let subsA ← subterms a
   let subsB ← subterms b
-  let mkFail (k : FailKind) : Fail := { line := a, next := b, kind := k }
+  let lctx ← getLCtx
+  let mkFail (k : FailKind) : Fail := { line := a, next := b, kind := k, lctx := some lctx }
   -- Re-read the selected part in this binder or `wp` state.
 
   let partNow : Option Expr ← match mv.partText with
@@ -1231,15 +1308,15 @@ def applyHere (mv : Move) (srcs : Array Src) (close : Option (TacticM Bool)) (sc
       s.restore
       worst := some ((mkFail .noPosition).better worst)
   for src in srcs do
-
-    let (nv, info) ← do
-      let s ← saveState
-      let vs ← src.make
-      let info ← vs.mapM fun (_, ty) => do
-        let sides := ty.iff? <|> (ty.eq?.map fun (_, x, y) => (x, y))
-        pure ((sides.map fun (l, _) => isBare l).getD false, (sides.map fun (_, r) => isBare r).getD false)
-      s.restore
-      pure (vs.size, info)
+    -- Build the variants once. Each attempt restores the assignments it makes.
+    let vs ← try src.make catch _ => pure #[]
+    let nv := vs.size
+    let info : Array (Bool × Bool) := vs.map fun p =>
+      let ty := p.2
+      let sides : Option (Expr × Expr) := ty.iff? <|> (ty.eq?.map fun t => (t.2.1, t.2.2))
+      match sides with
+      | some (l, r) => (isBare l, isBare r)
+      | none => (false, false)
     for symm in [false, true] do
       for i in [0:nv] do
         let bare := if symm then info[i]!.2 else info[i]!.1
@@ -1261,7 +1338,7 @@ def applyHere (mv : Move) (srcs : Array Src) (close : Option (TacticM Bool)) (sc
                 | none => [.pos [1]]
             for occs in occsList do
               let before ← saveState
-              match ← attempt src i symm u? a subsB occs inNext sc close with
+              match ← attempt src vs i symm u? a subsB occs inNext sc close with
               | some f =>
                 worst := some ((mkFail f).better worst)
                 break
@@ -1327,8 +1404,14 @@ def failMessage (mv : Move) (f : Fail) (probe : Option LocalDecl → Expr → Ta
   let X := mv.item
   let a := f.line
   let env ← getEnv
+  let shown (e : Expr) : TacticM MessageData := do
+    withLCtx (f.lctx.getD (← getLCtx)) (← getLocalInstances) do
+      let e' ← try displayForm e catch _ => pure e
+      addMessageContext (indentExpr e')
   let implication := !mv.laws.isEmpty && mv.laws.all fun c => classify env c == .imp && !isCondRewrite env c
-  if implication && !isImp then
+  -- Explain the `(A ⇒ B) = T` form only if the line has no implication to use it on.
+  let hasImp := (a.find? (·.isAppOfArity ``PT.Imp 2)).isSome
+  if implication && !isImp && !hasImp then
     match f.kind with
     | .noMatch | .open_ =>
       if pt.equalityOnly.get (← getOptions) then
@@ -1339,21 +1422,21 @@ def failMessage (mv : Move) (f : Fail) (probe : Option LocalDecl → Expr → Ta
   match f.kind with
   | .mismatch descr a' _ _ =>
     let other := if f.flipped then "line above" else "next line"
-    return m!"{descr} gives{indentExpr a'}\nbut the {other} is{indentExpr f.next}"
+    return m!"{descr} gives{← shown a'}\nbut the {other} is{← shown f.next}"
   | .noMatch =>
     if let some u := mv.part then
-      return m!"`{X}` does not apply to `{u}` in{indentExpr a}"
+      return m!"`{X}` does not apply to `{u}` in{← shown a}"
     if let some t := mv.partText then
-      return m!"`{X}` does not apply to `{t}` in{indentExpr a}"
+      return m!"`{X}` does not apply to `{t}` in{← shown a}"
     let stmts ← mv.laws.toList.take 3 |>.mapM fun c => do return (← lawStatement c)
     let stmts := if mv.laws.size > 3 then stmts ++ ["…"] else stmts
-    if stmts.isEmpty then return m!"`{X}` does not apply to any part of{indentExpr a}"
+    if stmts.isEmpty then return m!"`{X}` does not apply to any part of{← shown a}"
     let listed := "\n".intercalate (stmts.map fun s => "  " ++ s)
-    return m!"`{X}` does not apply to any part of{indentExpr a}\n{X} is\n{listed}"
+    return m!"`{X}` does not apply to any part of{← shown a}\n{X} is\n{listed}"
   | .open_ =>
     return m!"the instance of `{X}` is not determined by the line and the next line, name the part, `{X}: …`"
   | .noPosition =>
-    return m!"`{X}` does not apply at the top of the line or under ∧, ∨, ¬ and ⇒{indentExpr a}"
+    return m!"`{X}` does not apply at the top of the line or under ∧, ∨, ¬ and ⇒{← shown a}"
   | .condition c _ _ =>
 
     let listed := (pt.assumed.get (← getOptions)).splitOn "\u0001" |>.filter (· ≠ "")
@@ -1384,13 +1467,13 @@ def failMessage (mv : Move) (f : Fail) (probe : Option LocalDecl → Expr → Ta
           found := true
           break
       unless found do
-        return m!"`{X}` needs{indentExpr c}\nwhich does not follow by arithmetic from the assumptions of the proof"
+        return m!"`{X}` needs{← shown c}\nwhich does not follow by arithmetic from the assumptions of the proof"
     let ctext ← Meta.ppExpr c
     let extra := names.toList.map (s!"Assumption: {·}") ++ (if needFact then [s!"Arithmetic: {ctext}"] else [])
     let extra := extra.filter (!citedItems.contains ·)
     let hint := ", ".intercalate (["Conditional Substitution"] ++ citedItems ++ extra ++ [X])
     let ask := if needFact then "cite what it follows from" else "cite the assumption"
-    return m!"`{X}` needs{indentExpr c}\n{ask}, \{{hint}}"
+    return m!"`{X}` needs{← shown c}\n{ask}, \{{hint}}"
 
 partial def checkStep (hintText : String) (hintStx : Syntax := .missing) : TacticM Unit := do
   let env ← getEnv
@@ -1662,7 +1745,7 @@ partial def checkStep (hintText : String) (hintStx : Syntax := .missing) : Tacti
           throwError "`{plan[0]!.item}` is applied {k} times in this step, so cite it {k} times, \{{hint'}}"
     unsolved.restore
     if let some (l, r) := stepSides ty then
-      throwError "the step is not justified by {hint}: the part{indentExpr l}\nis not turned into{indentExpr r}"
+      throwError "the step is not justified by {hint}: the part{indentExpr (← try displayForm l catch _ => pure l)}\nis not turned into{indentExpr (← try displayForm r catch _ => pure r)}"
     throwError "the step is not justified by {hint}"
   -- Using the surrounding formula or an assumption requires Conditional Substitution.
 

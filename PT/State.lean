@@ -30,6 +30,12 @@ syntax (name := stateCmd) "state " sepBy1(ident+ " : " term, ", ") : command
       let b := mkIdent (Name.mkSimple n.getString!)
       let i ← withAppArg delab
       return ← `($b[$i])
+  -- An array variable applied to an index is `b[i]`.
+  if let .app (.fvar bid) _ := e then
+    if let some d := (← getLCtx).find? bid then
+      if d.type.isConstOf ``PT.Arr then
+        let i ← withAppArg delab
+        return ← `($(mkIdent d.userName)[$i])
   let .app f a := e | failure
   let .fvar fid := a | failure
   unless ← isσ fid do failure
@@ -107,12 +113,24 @@ partial def cmdOf : Term → UnexpandM (TSyntax `cmdT)
     else `(cmdT| $S:ident)
   | _ => throw ()
 
+private def wpTerm (S R : Term) : UnexpandM Term := do
+  let R ← match R with
+    | `(fun $_ => $body) => pure body
+    | r => pure r
+  `(wp($(← cmdOf S), $R))
+
+-- `wp(S₂, R)` inside `wp(S₁, …)` has no state argument.
 @[app_unexpander PT.wp] def unexpandWp : Unexpander
-  | `($_ $S $R $_) => do
-    let R ← match R with
-      | `(fun $_ => $body) => pure body
-      | r => pure r
-    `(wp($(← cmdOf S), $R))
+  | `($_ $S $R $_) => wpTerm S R
+  | `($_ $S $R) => wpTerm S R
+  | _ => throw ()
+
+/-- Display form of `PT.upd b i e`. -/
+syntax:max "(" term "; " term " : " term ")" : term
+
+@[app_unexpander PT.upd] def unexpandUpd : Unexpander
+  | `($_ $b $i $e $j) => `(($b; $i : $e)[$j])
+  | `($_ $b $i $e) => `(($b; $i : $e))
   | _ => throw ()
 
 end PT

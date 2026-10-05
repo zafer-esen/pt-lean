@@ -121,15 +121,16 @@ def hintTable : List HintEntry := [
            ["Sequential Composition"]⟩,
   ⟨"10.1", "Definition of Assignment", `DefinitionOfAssignment, ["Assignment", "10.2",
            "Definition of Multiple Assignment", "Definition of Multiple Assignments",
+           "Definition of multiple (or simultaneous) assignment",
            "Multiple Assignment", "Definition of simultaneous assignment"]⟩,
   ⟨"11.2", "Definition of IF", `DefinitionOfIF, ["11.1", "Definition of the alternative command",
            "Alternative Command", "Definition of the alternative command IF"]⟩ ]
 
-/-- Ignore case, spaces, and hyphens in hint names. -/
+/-- Ignore case, spaces, hyphens, and parentheses in hint names. -/
 def normalizeHint (s : String) : String :=
   let s := s.trimAscii.toString.toLower
   String.ofList (s.toList.filter fun c =>
-    !(c == ' ' || c == '-' || c == '_' || c == '/' || c == '\'' || c == '\t' || c == '\n' || c == '\r'))
+    !(c == ' ' || c == '-' || c == '_' || c == '/' || c == '\'' || c == '(' || c == ')' || c == '\t' || c == '\n' || c == '\r'))
 
 def isAssumptionKey (k : String) : Bool :=
   ["assumption", "assumptions", "hypothesis", "hypotheses", "premise", "premises"].contains k
