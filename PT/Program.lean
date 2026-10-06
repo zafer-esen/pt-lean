@@ -14,36 +14,79 @@ syntax (name := programCmd) "program " ident ptAnnot (ptcmd)?
 syntax (name := programIfCmd) "program " ident ptAnnot
   "if " ptGuard ((" □ " <|> " | ") ptGuard)* &"fi" ptAnnot : command
 
+private def sub (i : Nat) : String :=
+  String.map (fun c => Char.ofNat (c.toNat - '0'.toNat + 0x2080)) (toString i)
+
+private def rQ := "the precondition Q"
+private def rP := "the invariant P"
+private def rR := "the postcondition R"
+
+/-- Obligations of a loop with their forms in the notation of the appendix. -/
 def obligations (init : Option (TSyntax `ptcmd)) (Q P t : TSyntax `ptf)
     (guards : Array (TSyntax `ptf × TSyntax `ptcmd)) (fin : Option (TSyntax `ptcmd))
-    (R : TSyntax `ptf) : MacroM (Array (String × TSyntax `ptf)) := do
+    (R : TSyntax `ptf) : MacroM (Array (String × TSyntax `ptf × ObRoles)) := do
   let mut out := #[]
   let one := guards.size == 1
+  let bn (i : Nat) := if one then "B" else s!"B{sub i}"
+  let sn (i : Nat) := if one then "S" else s!"S{sub i}"
+  let bbs := " ∨ ".intercalate ((List.range guards.size).map fun i => bn (i + 1))
+  let bbp := if one then "B" else s!"({bbs})"
   let wpOr (S : Option (TSyntax `ptcmd)) (A : TSyntax `ptf) : MacroM (TSyntax `ptf) :=
     match S with
     | some S => `(ptf| wp($S:ptcmd, $A:ptf))
     | none => pure A
-  out := out.push ("init", ← `(ptf| ($Q) ⇒ $(← wpOr init P)))
+  out := out.push ("init", ← `(ptf| ($Q) ⇒ $(← wpOr init P)), match init with
+    | some _ => { template := "Q ⇒ wp(S₀, P)", ante := #[rQ], cmdSym := "S₀",
+                  postSym := "P" }
+    | none => { template := "Q ⇒ P", ante := #[rQ], cons := rP })
   for (B, S) in guards, i in [1:guards.size + 1] do
-    out := out.push (if one then "inv" else s!"inv{i}", ← `(ptf| ($P) ∧ ($B) ⇒ wp($S:ptcmd, $P:ptf)))
+    out := out.push (if one then "inv" else s!"inv{i}", ← `(ptf| ($P) ∧ ($B) ⇒ wp($S:ptcmd, $P:ptf)),
+      { template := s!"P ∧ {bn i} ⇒ wp({sn i}, P)", ante := #[rP, s!"the guard {bn i}"], cmdSym := sn i, postSym := "P" })
   let BB ← guards[1:].foldlM (init := guards[0]!.1) fun acc (B, _) => `(ptf| $acc ∨ $B)
-  out := out.push ("post", ← `(ptf| ($P) ∧ ¬($BB) ⇒ $(← wpOr fin R)))
-  out := out.push ("bound", ← `(ptf| ($P) ∧ ($BB) ⇒ 0 < $t))
+  let negRole := if one then "the negated guard ¬B" else s!"the negated guards ¬{bbp}"
+  out := out.push ("post", ← `(ptf| ($P) ∧ ¬($BB) ⇒ $(← wpOr fin R)), match fin with
+    | some _ => { template := s!"P ∧ ¬{bbp} ⇒ wp(Sf, R)", ante := #[rP, negRole], cmdSym := "Sf", postSym := "R" }
+    | none => { template := s!"P ∧ ¬{bbp} ⇒ R", ante := #[rP, negRole], cons := rR })
+  out := out.push ("bound", ← `(ptf| ($P) ∧ ($BB) ⇒ 0 < $t),
+    { template := s!"P ∧ {bbp} ⇒ 0 < t", ante := #[rP, if one then "the guard B" else s!"the guards {bbs}"],
+      cons := "0 < t for the bound t" })
   let t1 : TSyntax `ptf ← `(ptf| $(mkIdent `t1):ident)
   let save : TSyntax `ptcmd ← `(ptcmd| $(mkIdent `t1):ident := $t)
   for (B, S) in guards, i in [1:guards.size + 1] do
     out := out.push (if one then "dec" else s!"dec{i}",
-      ← `(ptf| ($P) ∧ ($B) ⇒ wp($save:ptcmd; $S:ptcmd, $t < $t1)))
+      ← `(ptf| ($P) ∧ ($B) ⇒ wp($save:ptcmd; $S:ptcmd, $t < $t1)),
+      { template := s!"P ∧ {bn i} ⇒ wp(t1 := t; {sn i}, t < t1)", ante := #[rP, s!"the guard {bn i}"],
+        cmdSym := s!"t1 := t; {sn i}", postSym := "t < t1" })
   return out
 
 /-- The Alternative Command Theorem. -/
 def ifObligations (Q R : TSyntax `ptf) (guards : Array (TSyntax `ptf × TSyntax `ptcmd)) :
-    MacroM (Array (String × TSyntax `ptf)) := do
+    MacroM (Array (String × TSyntax `ptf × ObRoles)) := do
+  let bbs := " ∨ ".intercalate ((List.range guards.size).map fun i => s!"B{sub (i + 1)}")
   let BB ← guards[1:].foldlM (init := guards[0]!.1) fun acc (B, _) => `(ptf| $acc ∨ $B)
-  let mut out := #[("guards", ← `(ptf| ($Q) ⇒ ($BB)))]
+  let gf ← `(ptf| ($Q) ⇒ ($BB))
+  let gr : ObRoles := { template := s!"Q ⇒ {bbs}", ante := #[rQ], cons := s!"the guards {bbs}" }
+  let mut out := #[("guards", gf, gr)]
   for (B, S) in guards, i in [1:guards.size + 1] do
-    out := out.push (s!"branch{i}", ← `(ptf| ($Q) ∧ ($B) ⇒ wp($S:ptcmd, $R:ptf)))
+    out := out.push (s!"branch{i}", ← `(ptf| ($Q) ∧ ($B) ⇒ wp($S:ptcmd, $R:ptf)),
+      { template := s!"Q ∧ B{sub i} ⇒ wp(S{sub i}, R)", ante := #[rQ, s!"the guard B{sub i}"],
+        cmdSym := s!"S{sub i}", postSym := "R" })
   return out
+
+/-- What the symbols of the obligation forms stand for, per program. -/
+initialize legendExt : EnvExtension (NameMap String) ← registerEnvExtension (pure {})
+
+private def guardList (n : Nat) : String :=
+  if n == 1 then "B → S the guarded command"
+  else ", ".intercalate ((List.range n).map fun i => s!"B{sub (i + 1)} → S{sub (i + 1)}") ++ " the guarded commands"
+
+private def defineObligations (name : Name) (obs : Array (String × TSyntax `ptf × ObRoles)) (legend : String) :
+    CommandElabM Unit := do
+  for (ob, f, roles) in obs do
+    let n := name ++ Name.mkSimple ob
+    elabCommand (← `(def $(mkIdent (n ++ `ob)) ($(mkIdent `σ) : $(mkIdent `St)) : Prop := ⟪$f⟫))
+    modifyEnv (obRolesExt.modifyState · (·.insert n roles))
+  modifyEnv (legendExt.modifyState · (·.insert name legend))
 
 private partial def savedBoundUse? (env : Environment) (stx : Syntax) : Option Syntax :=
   if stx.isIdent && stx.getId == `t1 then some stx
@@ -78,11 +121,10 @@ private partial def savedBoundUse? (env : Environment) (stx : Syntax) : Option S
     let some info := env.find? (st ++ `t1) | throwErrorAt name msg
     forallBoundedTelescope info.type (some 1) fun _ ty => do
       unless ← isDefEq ty (mkConst ``Int) do throwErrorAt name msg
-  let obs ← liftMacroM (obligations init Q P t guards fin R)
-  for (ob, f) in obs do
-    let n := mkIdent (name.getId ++ Name.mkSimple ob)
-
-    elabCommand (← `(def $(mkIdent (n.getId ++ `ob)) ($(mkIdent `σ) : $(mkIdent `St)) : Prop := ⟪$f⟫))
+  let items := ["Q and R are the pre- and postcondition", "P the invariant", "t the bound", guardList guards.size] ++
+    (if init.isSome then ["S₀ the initialization"] else []) ++ (if fin.isSome then ["Sf the final command"] else [])
+  let legend := ", ".intercalate items.dropLast ++ " and " ++ items.getLast!
+  defineObligations name.getId (← liftMacroM (obligations init Q P t guards fin R)) legend
 
 @[command_elab programIfCmd] def elabProgramIf : CommandElab := fun stx => do
   if stx.hasMissing then return
@@ -93,9 +135,10 @@ private partial def savedBoundUse? (env : Environment) (stx : Syntax) : Option S
   let R : TSyntax `ptf := ⟨stx[7][3]⟩
   if (← liftTermElabM stateName?).isNone then
     throwErrorAt name "declare the program variables with `state` first"
-  for (ob, f) in ← liftMacroM (ifObligations Q R guards) do
-    let n := mkIdent (name.getId ++ Name.mkSimple ob)
-    elabCommand (← `(def $(mkIdent (n.getId ++ `ob)) ($(mkIdent `σ) : $(mkIdent `St)) : Prop := ⟪$f⟫))
+  let legend := s!"Q and R are the pre- and postcondition and " ++
+    (if guards.size == 1 then "B₁ → S₁ the guarded command" else
+      ", ".intercalate ((List.range guards.size).map fun i => s!"B{sub (i + 1)} → S{sub (i + 1)}") ++ " the guarded commands")
+  defineObligations name.getId (← liftMacroM (ifObligations Q R guards)) legend
 
 /-- Generated obligations in appendix order. -/
 def obligationsOf (env : Environment) (name : Name) : Array Name := Id.run do
@@ -129,11 +172,13 @@ private def resolveProgramRef (id : Syntax) : CommandElabM Name := do
 syntax (name := obligationsCmd) "obligations " ident : command
 @[command_elab obligationsCmd] def elabObligations : CommandElab := fun stx => do
   let name ← resolveProgramRef stx[1]
-  if (obligationsOf (← getEnv) name).contains (name ++ `guards) then
-    throwError "the goals of an alternative command are those of the Alternative Command Theorem, write them yourself"
-  let lines ← obligationLines name
-  if lines.isEmpty then throwError "no `program {name}`"
-  logInfo (lines.foldl (fun acc l => acc ++ m!"\n  proof " ++ l) m!"obligations of {name}:")
+  let env ← getEnv
+  let obs := obligationsOf env name
+  if obs.isEmpty then throwError "no `program {name}`"
+  let roles := obRolesExt.getState env
+  let lines := obs.map fun n => m!"\n  proof {n} : {((roles.find? n).map (·.template)).getD "?"}"
+  let legend := ((legendExt.getState env).find? name).getD ""
+  logInfo (lines.foldl (· ++ ·) m!"obligations of {name}, in the notation of the appendix" ++ m!"\nwhere {legend}")
 
 syntax (name := verifiedCmd) "verified " ident : command
 @[command_elab verifiedCmd] def elabVerified : CommandElab := fun stx => do

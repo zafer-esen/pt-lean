@@ -52,7 +52,102 @@ def anonName (stx : Syntax) : CommandElabM Ident := do
   let line := ((← getFileMap).toPosition (stx.getPos?.getD 0)).line
   return mkIdent (Name.mkSimple s!"line {line} of {(← getMainModule).getString!}")
 
-/-- Compare with `n.ob` up to associativity and commutativity. Accept if no obligation exists. -/
+/-- `acNorm` under binders, with `≠`, `>`, `≥` unfolded and the sides of `=` ordered. -/
+partial def acNormDeep (e : Expr) : Expr :=
+  let e := e.consumeMData
+  match e with
+  | .lam n t b bi => .lam n t (acNormDeep b) bi
+  | .forallE n t b bi => .forallE n t (acNormDeep b) bi
+  | .app .. =>
+    let args := e.getAppArgs
+    let f := e.getAppFn
+    if e.isAppOfArity ``And 2 || e.isAppOfArity ``Or 2 then
+      let op := if e.isAppOfArity ``And 2 then ``And else ``Or
+      let ops := ((leaves op e).map acNormDeep).qsort (fun a b => Expr.lt a b)
+      ops.pop.foldr (fun x acc => mkApp2 (mkConst op) x acc) ops.back!
+    else if e.isAppOfArity ``Iff 2 || e.isAppOfArity ``Eq 3 then
+      let n := args.size
+      let a := acNormDeep args[n - 2]!
+      let b := acNormDeep args[n - 1]!
+      let (a, b) := if Expr.lt a b then (a, b) else (b, a)
+      mkAppN f (args.extract 0 (n - 2) ++ #[a, b])
+    else if e.isAppOfArity ``Ne 3 then
+      acNormDeep (mkApp (mkConst ``Not) (mkApp3 (mkConst ``Eq f.constLevels!) args[0]! args[1]! args[2]!))
+    else if e.isAppOfArity ``GT.gt 4 then
+      acNormDeep (mkApp4 (mkConst ``LT.lt f.constLevels!) args[0]! args[1]! args[3]! args[2]!)
+    else if e.isAppOfArity ``GE.ge 4 then
+      acNormDeep (mkApp4 (mkConst ``LE.le f.constLevels!) args[0]! args[1]! args[3]! args[2]!)
+    else mkAppN (acNormDeep f) (args.map acNormDeep)
+  | _ => e
+
+/-- Equal up to order, grouping and integer cancellation, as two lines of a trivial step. -/
+def sameFormula (a b : Expr) : MetaM Bool := do
+  if ← (try Meta.isDefEq a b catch _ => pure false) then return true
+  let norm (e : Expr) : MetaM Expr := do
+    let e ← instantiateMVars e
+    let e ← try pure (← intNormalize e).expr catch _ => pure e
+    return acNormDeep e
+  return (← norm a) == (← norm b)
+
+/-- Roles of the parts of a program obligation, in the notation of the appendix. -/
+structure ObRoles where
+  template : String
+  ante : Array String
+  cons : String := ""
+  cmdSym : String := ""
+  postSym : String := ""
+  deriving Inhabited
+
+initialize obRolesExt : EnvExtension (NameMap ObRoles) ← registerEnvExtension (pure {})
+
+/-- Say which part of statement `e` differs from obligation `n`, without showing the obligation. -/
+def diagnoseObligation (n : Name) (e σ : Expr) : MetaM (Option String) := do
+  let env ← getEnv
+  let roles? := (obRolesExt.getState env).find? n
+  let some roles := roles? | return none
+  let some v := (env.find? (n ++ `ob)).bind (·.value?) | return none
+  let ob ← Meta.instantiateLambda v #[σ]
+  let some (oa, oc) := ob.app2? ``PT.Imp | return none
+  let parts := if roles.ante.size == 2 then (match oa.app2? ``And with
+      | some (x, y) => #[x, y]
+      | none => #[oa]) else #[oa]
+  let e ← instantiateMVars e
+  let some (sa, sc) := e.app2? ``PT.Imp | return some "it is an implication"
+  if parts.size == 2 && sc.isAppOfArity ``PT.Imp 2 && !sa.isAppOfArity ``And 2 then
+    return some "write its antecedent as one conjunction"
+  let sLeaves := leaves ``And sa
+  let mut used := sLeaves.map fun _ => false
+  for p in parts, role in roles.ante do
+    for l in leaves ``And p do
+      match ← sLeaves.findIdxM? (sameFormula · l) with
+      | some j => used := used.set! j true
+      | none => return some s!"its antecedent is missing {role}"
+  -- An extra part may belong to another obligation of the program.
+  let siblings := (obRolesExt.getState env).toList.filter fun (m, _) => m.getPrefix == n.getPrefix && m != n
+  for l in sLeaves, u in used do
+    if u then continue
+    for (m, r) in siblings do
+      let some w := (env.find? (m ++ `ob)).bind (·.value?) | continue
+      let some (ma, _) := (← Meta.instantiateLambda w #[σ]).app2? ``PT.Imp | continue
+      let mparts := if r.ante.size == 2 then (match ma.app2? ``And with
+          | some (x, y) => #[x, y]
+          | none => #[ma]) else #[ma]
+      for mp in mparts, role in r.ante do
+        if (← (leaves ``And mp).anyM (sameFormula · l)) && !roles.ante.contains role then
+          return some s!"its antecedent has {role}, which belongs to another obligation"
+    return some s!"its antecedent has a part that is not {" or ".intercalate roles.ante.toList}"
+  if roles.cmdSym != "" then
+    let expectWp := s!"its consequent is not wp({roles.cmdSym}, {roles.postSym})"
+    unless sc.isAppOfArity ``PT.wp 4 && oc.isAppOfArity ``PT.wp 4 do return some expectWp
+    unless ← sameFormula (sc.getArg! 1) (oc.getArg! 1) do
+      return some s!"inside wp, the command is not {roles.cmdSym}"
+    unless ← sameFormula ((sc.getArg! 2).beta #[σ]) ((oc.getArg! 2).beta #[σ]) do
+      return some s!"inside wp, the postcondition is not {roles.postSym}"
+  else
+    unless ← sameFormula sc oc do return some s!"its consequent is not {roles.cons}"
+  return none
+
+/-- Compare with `n.ob` up to order, grouping and integer cancellation. Accept if no obligation exists. -/
 def statesObligation (n : Name) : CommandElabM Bool := do
   let env ← getEnv
   let some ci := env.find? n | return false
@@ -61,9 +156,8 @@ def statesObligation (n : Name) : CommandElabM Bool := do
     let .forallE _ St _ _ := ob.type | return false
     Meta.withLocalDeclD `σ St fun σ => do
       let a ← Meta.instantiateForall ci.type #[σ]
-      if ← (try Meta.isDefEq a (mkApp (mkConst (n ++ `ob)) σ) catch _ => pure false) then return true
       let some v := ob.value? | return false
-      return acNorm (← instantiateMVars a) == acNorm (← Meta.instantiateLambda v #[σ])
+      sameFormula a (← Meta.instantiateLambda v #[σ])
 
 /-- Obligation proofs rejected for their statement, reported by `verified` instead of "missing". -/
 initialize rejectedExt : EnvExtension (Array Name) ← registerEnvExtension (pure #[])
@@ -146,18 +240,20 @@ def relaxedOptions : CommandElabM Bool := do
     let ob := fullName ++ `ob
     if (← getEnv).contains ob then
       let some stName := stName? | throwError "no `state` declared"
-      let ok ← liftTermElabM do
+      let (ok, why) ← liftTermElabM do
         Term.withAutoBoundImplicit <| Meta.withLocalDeclD `σ (mkConst stName) fun σ => do
           let e ← Term.elabTerm (← `(⟪$stmt⟫)) (some (mkSort .zero))
           Term.synthesizeSyntheticMVarsNoPostponing
           let e ← instantiateMVars e
-
-          if ← (try Meta.isDefEq e (mkApp (mkConst ob) σ) catch _ => pure false) then return true
-          let some v := ((← getEnv).find? ob).bind (·.value?) | return false
-          return acNorm e == acNorm (← Meta.instantiateLambda v #[σ])
+          let some v := ((← getEnv).find? ob).bind (·.value?) | return (false, none)
+          if ← sameFormula e (← Meta.instantiateLambda v #[σ]) then return (true, none)
+          return (false, ← diagnoseObligation fullName e σ)
       unless ok do
         modifyEnv (rejectedExt.modifyState · (·.push fullName))
-        throwErrorAt stx[4] "this is not the obligation `{fullName}` of `program`"
+        let form := ((obRolesExt.getState (← getEnv)).find? fullName).map (·.template)
+        let why := why.map (s!", " ++ ·) |>.getD ""
+        let form := form.map (s!". It has the form " ++ ·) |>.getD ""
+        throwErrorAt stx[4] "this is not the obligation `{fullName}` of `program`{why}{form}"
     else if n.getId.getNumParts > 1 && isObligationName n.getId.getString! then
       let prog := fullName.getPrefix
       let env ← getEnv
@@ -267,7 +363,7 @@ syntax (name := expectCmd) "expect " ident (num <|> scientific)? (ptBinder)* (" 
       let e ← Term.elabTerm (← `(⟪$stmt⟫)) (some (mkSort .zero))
       Term.synthesizeSyntheticMVarsNoPostponing
       Meta.mkForallFVars xs (← instantiateMVars e)
-    unless ← liftTermElabM (Meta.isDefEq expected ci.type) do
+    unless ← liftTermElabM (sameFormula expected ci.type) do
       report s!"proved a different statement (0 of {pts} pts)"; return
     report s!"proved ({pts} pts)"
   else

@@ -88,7 +88,7 @@ program countdown
 obligations countdown
 ```
 
-For the iterative command, `obligations` lists the proof goals. These need separate proofs named as listed, e.g.,`proof countdown.init : …`. `verified countdown` checks all goals.
+`obligations countdown` lists the names of the proof goals and their form in the notation of the appendix. Each goal needs a proof of its own under that name that states it for this program, e.g., `proof countdown.init : …`. A wrong statement is rejected with the part that differs. `verified countdown` checks that all goals are stated and proved.
 
 A `program` can also be a single alternative command `if … fi` between `{Q : …}` and `{R : …}`. Its goals are those of the Alternative Command Theorem, named `guards`, `branch1`, `branch2`, and so on.
 
