@@ -65,7 +65,18 @@ def statesObligation (n : Name) : CommandElabM Bool := do
       let some v := ob.value? | return false
       return acNorm (← instantiateMVars a) == acNorm (← Meta.instantiateLambda v #[σ])
 
+/-- Obligation proofs rejected for their statement, reported by `verified` instead of "missing". -/
+initialize rejectedExt : EnvExtension (Array Name) ← registerEnvExtension (pure #[])
+
+/-- Names of the obligations that `program` generates. -/
+def isObligationName (s : String) : Bool :=
+  let base := String.ofList (s.toList.takeWhile Char.isAlpha)
+  let num := String.ofList (s.toList.dropWhile Char.isAlpha)
+  (num.isEmpty || num.isNat) &&
+    (["inv", "dec", "branch"].contains base || (num.isEmpty && ["init", "post", "bound", "guards"].contains base))
+
 structure ProofCheck where
+  rejected : Bool := false
   present : Bool := false
   block : Bool := false
   complete : Bool := false
@@ -74,7 +85,7 @@ structure ProofCheck where
   matchesObligation : Bool := true
 
 def ProofCheck.issue? (c : ProofCheck) : Option String :=
-  if !c.present then some "missing"
+  if !c.present then some (if c.rejected then "its statement is not the obligation" else "missing")
   else if !c.block then some "not a proof block"
   else if !c.complete then some "not proved"
   else if c.axiomatic then some "rests on an axiom of the file"
@@ -84,7 +95,7 @@ def ProofCheck.issue? (c : ProofCheck) : Option String :=
 
 def checkProof (n : Name) : CommandElabM ProofCheck := do
   let env ← getEnv
-  let some ci := env.find? n | return {}
+  let some ci := env.find? n | return { rejected := (rejectedExt.getState env).contains n }
   unless ci.isTheorem do return { present := true }
   let axioms ← liftCoreM (collectAxioms n)
   return {
@@ -145,7 +156,15 @@ def relaxedOptions : CommandElabM Bool := do
           let some v := ((← getEnv).find? ob).bind (·.value?) | return false
           return acNorm e == acNorm (← Meta.instantiateLambda v #[σ])
       unless ok do
+        modifyEnv (rejectedExt.modifyState · (·.push fullName))
         throwErrorAt stx[4] "this is not the obligation `{fullName}` of `program`"
+    else if n.getId.getNumParts > 1 && isObligationName n.getId.getString! then
+      let prog := fullName.getPrefix
+      let env ← getEnv
+      let isProgram := env.contains (prog ++ `init.ob) || env.contains (prog ++ `guards.ob)
+      logWarningAt n (if isProgram then
+          m!"`{prog}` has no obligation `{n.getId.getString!}`, so this is checked as an ordinary proof"
+        else m!"there is no `program {prog}`, so this is checked as an ordinary proof")
   let steps := stx[7].getArgs
 
   if stx[6].getNumArgs == 0 && !steps.isEmpty then

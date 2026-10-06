@@ -37,6 +37,21 @@ status
 - Use `assume A, B, ...` to prove `A ∧ B ∧ ... ⇒ C` by showing `C`. Refer to assumptions with `{Assumption: A}`. Add `Conditional Substitution` when a rule's condition comes from an assumption. A condition that is only part of the formula is used with Substitution (2.33) or Replace by T (2.34).
 - Arithmetic is also supported, e.g., `{Arithmetic: m ≤ m + 1}`. The arithmetic formula must always be specified.
 
+An implication proved with `assume`:
+
+```lean
+import PT
+
+proof example2 (p q) : p ∧ q ⇒ p ∨ q
+assume p, q
+    p ∨ q
+= {Assumption: p}
+    T ∨ q
+= {Or-simplification}
+    T
+qed
+```
+
 ## Notation
 
 | Meaning | Notation | ASCII alternative |

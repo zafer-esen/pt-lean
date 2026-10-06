@@ -129,6 +129,8 @@ private def resolveProgramRef (id : Syntax) : CommandElabM Name := do
 syntax (name := obligationsCmd) "obligations " ident : command
 @[command_elab obligationsCmd] def elabObligations : CommandElab := fun stx => do
   let name ← resolveProgramRef stx[1]
+  if (obligationsOf (← getEnv) name).contains (name ++ `guards) then
+    throwError "the goals of an alternative command are those of the Alternative Command Theorem, write them yourself"
   let lines ← obligationLines name
   if lines.isEmpty then throwError "no `program {name}`"
   logInfo (lines.foldl (fun acc l => acc ++ m!"\n  proof " ++ l) m!"obligations of {name}:")
