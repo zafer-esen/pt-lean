@@ -219,13 +219,6 @@ def focusMain (tac : TacticM Unit) : TacticM Bool := do
 def closeByRfl : TacticM Bool :=
   focusMain do evalTactic (← `(tactic| with_reducible rfl))
 
-/-- Detect conditions discharged from the surrounding formula. -/
-def usesLineHyp (pf : Expr) : MetaM Bool := do
-  let lctx ← getLCtx
-  return pf.hasAnyFVar fun f => match lctx.find? f with
-    | some d => let s := d.userName.eraseMacroScopes.toString; s == "h" || s.startsWith "h_"
-    | none => false
-
 def stepSides (ty : Expr) : Option (Expr × Expr) :=
   match ty.iff? with
   | some (a, b) => some (a, b)
@@ -474,8 +467,7 @@ def rewriteLeft (heq : Expr) (symm : Bool) (occs : Occurrences) (sc : Scope) : T
     if ← isProp mty then
       unless ← closeCondition m sc.helpers do return some (.condition mty (← sc.closable mty) false)
       let pf ← instantiateMVars (mkMVar m)
-      if pf.hasAnyFVar (sc.cited.contains ·) || pf.getUsedConstants.any sc.helpers.contains
-          || (← usesLineHyp pf) then
+      if pf.hasAnyFVar (sc.cited.contains ·) || pf.getUsedConstants.any sc.helpers.contains then
         sc.usedHyp.set true
     else return some .open_
   return none
@@ -632,41 +624,12 @@ partial def andLeaves (pf ty : Expr) : Array (Expr × Expr) :=
   | some (a, b) => andLeaves (mkApp3 (mkConst ``And.left) a b pf) a ++ andLeaves (mkApp3 (mkConst ``And.right) a b pf) b
   | none => #[(pf, ty)]
 
-/-- Make the unchanged conjunct or antecedent available as a side condition. -/
-def zoomWithHyp (lem : Name) : TacticM Bool := do
-  let s ← saveState
-  try
-    let goal ← getMainGoal
-    let gs ← goal.apply (← mkConstWithFreshMVarLevels lem)
-    let gs ← gs.filterM fun g => return !(← g.isAssigned)
-    let [g] := gs | s.restore; return false
-    setGoals [g]
-    evalTactic (← `(tactic| intro h))
-
-    let g ← getMainGoal
-    let d := (← g.getDecl).lctx.lastDecl.get!
-    let ls := andLeaves (mkFVar d.fvarId) d.type
-    if ls.size > 1 then
-      let hyps := ls.mapIdx fun i (pf, ty) => ({ userName := Name.mkSimple s!"h_{i + 1}", type := ty, value := pf } : Hypothesis)
-      let (_, g') ← g.assertHypotheses hyps
-      replaceMainGoal [g']
-    return true
-  catch _ =>
-    s.restore
-    return false
-
 /-- Descend through a shared connective or binder into the single part that changes. -/
 def zoomIn : TacticM Bool := do
   let s ← saveState
   let ty ← instantiateMVars (← getMainTarget)
   let some (a, b) := ty.iff? | return false
   let sameHead (n : Name) (k : Nat) := a.isAppOfArity n k && b.isAppOfArity n k
-  let hypLems : List Name :=
-    if sameHead ``And 2 then [``and_congr_right, ``and_congr_left]
-    else if sameHead ``PT.Imp 2 then [``PT.Imp.congr_right]
-    else []
-  for lem in hypLems do
-    if ← zoomWithHyp lem then return true
   let lem? : Option Name :=
     if sameHead ``And 2 then some ``and_congr
     else if sameHead ``Or 2 then some ``or_congr
@@ -694,7 +657,7 @@ def zoomIn : TacticM Bool := do
       let x := if body.isLambda then body.bindingName! else `x
       let hx := Name.mkSimple s!"h_{x}"
       evalTactic (← `(tactic| intro $(mkIdent x):ident))
-      evalTactic (← `(tactic| try intro $(mkIdent hx):ident))
+      evalTactic (← `(tactic| try (intro $(mkIdent hx):ident; clear $(mkIdent hx):ident)))
     else if lem == ``PT.wp_congr then
       let post := a.getArg! 2
       let x := if post.isLambda then post.bindingName! else `σ
@@ -863,7 +826,7 @@ def smallerMessage (text : String) (sm : Smaller) (cited : List String) : Tactic
   let asFact := if sm.holds then part else s!"({part}) = F"
   unless sm.ctx.isEmpty do
     let ctx := " ∧ ".intercalate (← sm.ctx.toList.mapM pp)
-    return head ++ m!"`{part}` is {tf} under `{ctx}`. Take the relation as the fact, \{Arithmetic: {ctx} ⇒ (({part}) = {tf})}, {rest}"
+    return head ++ m!"`{part}` is {tf} under `{ctx}`. Take that in a step of its own, by Replace by T (2.34) or Substitution (2.33), or by Conditional Substitution if `{ctx}` is an assumption, {rest}"
   let what := if sm.isRel then m!"`{part}` is {tf}" else m!"`{part}` {if sm.holds then "holds" else "fails"}"
   if sm.byAssumptions then
     let hint := ", ".intercalate (["Conditional Substitution"] ++ cited ++ [s!"Arithmetic: {asFact}"])
@@ -1093,6 +1056,20 @@ def pivots (e : Expr) : Array Expr := Id.run do
     out := out.push (mkApp2 (mkConst op) xs[i]! rest) |>.push (mkApp2 (mkConst op) rest xs[i]!)
   return out
 
+/-- A proof of `u ↔ u'` when the two differ only in order and grouping. -/
+def acIff (u u' : Expr) : TacticM (Option Expr) := do
+  let h ← mkFreshExprMVar (mkApp2 (mkConst ``Iff) u u')
+  let gs ← getGoals
+  try
+    setGoals [h.mvarId!]
+    evalTactic (← `(tactic| pt_ac))
+    let done := (← getUnsolvedGoals).isEmpty
+    setGoals gs
+    if done then return some (← instantiateMVars h) else return none
+  catch _ =>
+    setGoals gs
+    return none
+
 /-- Regroupings of both sides of an implication. -/
 def impRegroupings (u : Expr) : Array Expr := Id.run do
   let some (x, y) := u.app2? ``PT.Imp | return #[]
@@ -1205,23 +1182,29 @@ def attempt (src : Src) (vs : Array (Expr × Expr)) (i : Nat) (symm : Bool) (u? 
         for u' in impRegroupings u do
           let s' ← saveState
           if ← isDefEq pat u' then
-            let h ← mkFreshExprMVar (mkApp2 (mkConst ``Iff) u u')
-            let ok ← try
-                let gs ← getGoals
-                setGoals [h.mvarId!]
-                evalTactic (← `(tactic| pt_ac))
-                let done := (← getUnsolvedGoals).isEmpty
-                setGoals gs
-                pure done
-              catch _ => pure false
-            if ok then
-              v := mkApp5 (mkConst ``Iff.trans) u u' (mkConst ``PT.T) (← instantiateMVars h) v
+            if let some h ← acIff u u' then
+              v := mkApp5 (mkConst ``Iff.trans) u u' (mkConst ``PT.T) h v
               pat := u
               break
           s'.restore
     if src.schema then
       let some t := u? | return ← fail .noMatch
-      unless ← schemaInstance v pat a t do return ← fail .noMatch
+      let s0 ← saveState
+      unless ← schemaInstance v pat a t do
+        -- Match the line up to order and grouping, then rewrite it through the regrouping.
+        s0.restore
+        let mut found := false
+        for a' in impRegroupings a ++ pivots a do
+          let s' ← saveState
+          if ← schemaInstance v pat a' t then
+            if let some h ← acIff a a' then
+              let some (l, r) := (← instantiateMVars vty).iff? | break
+              v := if symm then mkApp5 (mkConst ``Iff.trans) l a' a v (mkApp3 (mkConst ``Iff.symm) a a' h)
+                else mkApp5 (mkConst ``Iff.trans) a a' r h v
+              found := true
+              break
+          s'.restore
+        unless found do return ← fail .noMatch
     else
       match u? with
       | some u =>
@@ -1296,8 +1279,7 @@ def applyHere (mv : Move) (srcs : Array Src) (close : Option (TacticM Bool)) (sc
             ok := false
             break
           let pf ← instantiateMVars (mkMVar g)
-          if pf.hasAnyFVar (sc.cited.contains ·) || pf.getUsedConstants.any sc.helpers.contains
-              || (← usesLineHyp pf) then
+          if pf.hasAnyFVar (sc.cited.contains ·) || pf.getUsedConstants.any sc.helpers.contains then
             sc.usedHyp.set true
         if ok then
           setGoals []
@@ -1397,8 +1379,15 @@ partial def applyMove (mv : Move) (srcs : Array Src) (close : Option (TacticM Bo
         | _ => return some (f.better (some f'))
     return some f
 
+/-- Antecedents and conjuncts of a formula. -/
+partial def contextParts (e : Expr) : Array Expr :=
+  let here := match e.app2? ``PT.Imp with
+    | some (a, _) => leaves ``And a
+    | none => if e.isAppOfArity ``And 2 then leaves ``And e else #[]
+  e.getAppArgs.foldl (fun acc x => acc ++ contextParts x) here
+
 def failMessage (mv : Move) (f : Fail) (probe : Option LocalDecl → Expr → TacticM Bool) (uncited : Array LocalDecl)
-    (citedItems : List String) (isImp : Bool) : TacticM MessageData := do
+    (citedItems : List String) (isImp : Bool) (stepLine : Expr) : TacticM MessageData := do
   let X := mv.item
   let a := f.line
   let env ← getEnv
@@ -1465,6 +1454,8 @@ def failMessage (mv : Move) (f : Fail) (probe : Option LocalDecl → Expr → Ta
           found := true
           break
       unless found do
+        if (contextParts stepLine).contains part then
+          return m!"`{X}` needs{← shown c}\nwhich is part of the formula, not an assumption. Use the formula with Substitution (2.33) or Replace by T (2.34)"
         return m!"`{X}` needs{← shown c}\nwhich does not follow by arithmetic from the assumptions of the proof"
     let ctext ← Meta.ppExpr c
     let extra := names.toList.map (s!"Assumption: {·}") ++ (if needFact then [s!"Arithmetic: {ctext}"] else [])
@@ -1724,7 +1715,7 @@ partial def checkStep (hintText : String) (hintStx : Syntax := .missing) : Tacti
           if found then
             unsolved.restore
             throwError "`{mv.item}` is applied {k} times in this step, so cite it {k} times, \{{hint'}}"
-      let msg ← failMessage mv f probe uncited citedItems isImp
+      let msg ← failMessage mv f probe uncited citedItems isImp a
       unsolved.restore
       throwError "the step is not justified by {hint}:{indentExpr goalTy}\n{msg}"
 
@@ -1745,12 +1736,12 @@ partial def checkStep (hintText : String) (hintStx : Syntax := .missing) : Tacti
     if let some (l, r) := stepSides ty then
       throwError "the step is not justified by {hint}: the part{indentExpr (← try displayForm l catch _ => pure l)}\nis not turned into{indentExpr (← try displayForm r catch _ => pure r)}"
     throwError "the step is not justified by {hint}"
-  -- Using the surrounding formula or an assumption requires Conditional Substitution.
+  -- Using an assumption, a fact or a proved theorem for a condition requires Conditional Substitution.
 
   if (← sc.usedHyp.get) && !condSubst then
     unsolved.restore
     let hint := ", ".intercalate (["Conditional Substitution"] ++ citedItems ++ moves.toList.map (·.item))
-    throwError "the condition of the theorem comes from an assumption or from the line itself, so the step is a conditional substitution, \{{hint}}"
+    throwError "the condition of the theorem comes from an assumption, a fact or a proved theorem, so the step is a conditional substitution, \{{hint}}"
 
 /-! ## Tactics -/
 

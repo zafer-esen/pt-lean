@@ -34,7 +34,7 @@ status
 - A calculation starts with a formula and ends with `qed`. An equality can be calculated from either side, or the whole statement reduced to `T` (or vice versa).
 - Rules accept names. E.g., `{Implication}`. A formula can be specified explicitly in order to tell the tool where exactly a rule should apply, e.g.,`{Negation: p}`.
 - Order and grouping of `∧` and `∨`, equality symmetry, and simple integer cancellation are automatic. Parentheses limit where rules apply. Use `{Commutativity}`, `{Associativity}`, or `{Identity}` when only rearranging a formula.
-- Use `assume A, B, ...` to prove `A ∧ B ∧ ... ⇒ C` by showing `C`. Refer to assumptions with `{Assumption: A}`. Add `Conditional Substitution` when a rule's condition comes from an assumption or the surrounding formula.
+- Use `assume A, B, ...` to prove `A ∧ B ∧ ... ⇒ C` by showing `C`. Refer to assumptions with `{Assumption: A}`. Add `Conditional Substitution` when a rule's condition comes from an assumption. A condition that is only part of the formula is used with Substitution (2.33) or Replace by T (2.34).
 - Arithmetic is also supported, e.g., `{Arithmetic: m ≤ m + 1}`. The arithmetic formula must always be specified.
 
 ## Notation
