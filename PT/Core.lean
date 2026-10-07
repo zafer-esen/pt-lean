@@ -35,10 +35,23 @@ theorem F.elim' {p : Prop} (h : F) : p := False.elim h
 @[simp] theorem F_def : F = False := rfl
 @[simp] theorem Imp_def (p q : Prop) : (p ⇒ q) = (p → q) := rfl
 
-open Lean PrettyPrinter in
+open Lean PrettyPrinter Delaborator SubExpr in
+/-- Formula equality binds looser than `⇒`, so bracket it unless it is the whole formula. -/
+@[delab app.Iff] def delabIff : Delab := do
+  guard ((← getExpr).getAppNumArgs == 2)
+  let p ← withAppFn (withAppArg delab)
+  let q ← withAppArg delab
+  if (← getPos).isRoot then `($p = $q) else `(($p = $q))
 
-@[app_unexpander Iff] def unexpandIff : Unexpander
-  | `($_ $p $q) => `($p = $q)
+/-- Display form of a predicate or function applied to arguments, `P(x, y)`. -/
+syntax:max (name := callDisplay) ident noWs "(" term,+ ")" : term
+macro_rules (kind := callDisplay)
+  | `($f:ident($x)) => `($f ($x))
+  | `($f:ident($x, $xs,*)) => `($f ($x, $xs,*))
+
+open Lean PrettyPrinter in
+@[app_unexpander even, app_unexpander odd] def unexpandParity : Unexpander
+  | `($f:ident $x) => `($f:ident($x))
   | _ => throw ()
 
 @[refl] theorem Imp.refl (p : Prop) : p ⇒ p := fun h => h

@@ -60,6 +60,7 @@ open Lean PrettyPrinter in
   | `($_ $R $P) => match R, P with
     | `(fun $i:ident => $r), `(fun $j:ident => $b) =>
       if i.getId == j.getId then `(∀ $i : $r : $b) else throw ()
+    | `(fun $i:ident => $r), `($p:ident) => `(∀ $i : $r : $p:ident($i))
     | `(fun $i:ident => $r), p => `(∀ $i : $r : $p $i)
     | _, _ => throw ()
   | _ => throw ()
@@ -68,6 +69,7 @@ open Lean PrettyPrinter in
   | `($_ $R $P) => match R, P with
     | `(fun $i:ident => $r), `(fun $j:ident => $b) =>
       if i.getId == j.getId then `(∃ $i : $r : $b) else throw ()
+    | `(fun $i:ident => $r), `($p:ident) => `(∃ $i : $r : $p:ident($i))
     | `(fun $i:ident => $r), p => `(∃ $i : $r : $p $i)
     | _, _ => throw ()
   | _ => throw ()

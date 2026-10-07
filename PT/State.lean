@@ -36,6 +36,16 @@ syntax (name := stateCmd) "state " sepBy1(ident+ " : " term, ", ") : command
       if d.type.isConstOf ``PT.Arr then
         let i ← withAppArg delab
         return ← `($(mkIdent d.userName)[$i])
+  -- A predicate or function variable applied to arguments is `P(x, y)`.
+  if let .fvar hid := e.getAppFn then
+    if let some d := (← getLCtx).find? hid then
+      let ret := d.type.getForallBody
+      let args := e.getAppArgs
+      if (ret.isProp || ret.isConstOf ``Int) && !(← isσ hid) &&
+          !(← args.anyM fun a => match a with | .fvar f => isσ f | _ => pure false) then
+        let xs ← (Array.range args.size).mapM fun i => withNaryArg i delab
+        let f := mkIdent d.userName
+        return ← `($f:ident($xs,*))
   let .app f a := e | failure
   let .fvar fid := a | failure
   unless ← isσ fid do failure

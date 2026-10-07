@@ -825,7 +825,7 @@ def smallerMessage (text : String) (sm : Smaller) (cited : List String) : Tactic
   let rest := "and the rest by the laws"
   let asFact := if sm.holds then part else s!"({part}) = F"
   unless sm.ctx.isEmpty do
-    let ctx := " ∧ ".intercalate (← sm.ctx.toList.mapM pp)
+    let ctx ← pp (sm.ctx.pop.foldr (fun c acc => mkApp2 (mkConst ``And) c acc) sm.ctx.back!)
     return head ++ m!"`{part}` is {tf} under `{ctx}`. Take that in a step of its own, by Replace by T (2.34) or Substitution (2.33), or by Conditional Substitution if `{ctx}` is an assumption, {rest}"
   let what := if sm.isRel then m!"`{part}` is {tf}" else m!"`{part}` {if sm.holds then "holds" else "fails"}"
   if sm.byAssumptions then
@@ -1115,17 +1115,24 @@ def sourcesOf (mv : Move) (isImp : Bool) : TacticM (Array Src) := do
   for c in mv.laws do
     let kind := if classify env c == .imp && isCondRewrite env c then .equiv else classify env c
     match kind with
-    | .equiv =>
-      out := out.push { name := s!"`{mv.item}`", make := do
-        let (e, ty) ← instantiateLaw c
-        (← acVariants e ty).mapM fun v => do pure (v, ← instantiateMVars (← inferType v)) }
+    | .equiv | .schema =>
+      if kind == .schema then
+        out := out.push { name := s!"`{mv.item}`", make := do pure #[← instantiateLaw c], schema := true }
+      else
+        out := out.push { name := s!"`{mv.item}`", make := do
+          let (e, ty) ← instantiateLaw c
+          (← acVariants e ty).mapM fun v => do pure (v, ← instantiateMVars (← inferType v)) }
+      -- the law is also a formula equal to `T`, with its condition as the antecedent
       if ← hasCondition c then
         out := out.push { name := s!"`{mv.item}`", make := do
           match ← formulaOfConditional c with
           | some p => pure #[p]
           | none => pure #[] }
-    | .schema =>
-      out := out.push { name := s!"`{mv.item}`", make := do pure #[← instantiateLaw c], schema := true }
+      else
+        out := out.push { name := s!"`{mv.item}`", make := do
+          let (e, ty) ← instantiateLaw c
+          (← acVariants (mkApp2 (mkConst ``PT.iffT) ty e) (mkApp2 (mkConst ``Iff) ty (mkConst ``PT.T))).mapM
+            fun v => do pure (v, ← instantiateMVars (← inferType v)) }
     | .imp =>
       -- an implication in an `=` step is the formula `(X ⇒ Y) = T`
       unless isImp do
