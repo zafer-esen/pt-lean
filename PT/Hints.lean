@@ -244,6 +244,7 @@ def inSections (maxSec : Nat) (e : HintEntry) : Bool := maxSec == 0 || sectionOf
 
 def hintEntries (s : String) : List HintEntry :=
   let k := normalizeHint s
+  let k := if k.startsWith "axiom" then (k.drop 5).toString else if k.startsWith "theorem" then (k.drop 7).toString else k
   hintTable.filter fun e =>
     (e.number != "" && normalizeHint e.number == k) || normalizeHint e.name == k ||
     e.aliases.any (normalizeHint · == k)
@@ -285,9 +286,9 @@ def unknownHint (env : Environment) (item : String) (maxSec : Nat) : MessageData
     else
       let sug := suggestions k
       if sug.isEmpty then
-        m!"`{item}` is not an axiom or theorem of the appendix. Close names are {", ".intercalate (nearest k 5)}"
+        m!"`{item}` is not an axiom or theorem of the appendix, or a proof above this one. Close names are {", ".intercalate (nearest k 5)}"
       else
-        m!"`{item}` is not an axiom or theorem of the appendix. Did you mean {", ".intercalate (sug.map (s!"`{·}`"))}?"
+        m!"`{item}` is not an axiom or theorem of the appendix, or a proof above this one. Did you mean {", ".intercalate (sug.map (s!"`{·}`"))}?"
 
 /-- Split items at commas outside brackets. A colon selects a formula. -/
 def parseHint (s : String) : List (String × Option String) := Id.run do

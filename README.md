@@ -35,7 +35,7 @@ status
 - Rules accept names. E.g., `{Implication}`. A formula can be specified explicitly in order to tell the tool where exactly a rule should apply, e.g.,`{Negation: p}`.
 - Order and grouping of `∧` and `∨`, equality symmetry, and simple integer cancellation are automatic. Parentheses limit where rules apply. Use `{Commutativity}`, `{Associativity}`, or `{Identity}` when only rearranging a formula.
 - Use `assume A, B, ...` to prove `A ∧ B ∧ ... ⇒ C` by showing `C`. Refer to assumptions with `{Assumption: A}`. Add `Conditional Substitution` when a rule's condition comes from an assumption. A condition that is only part of the formula is used with Substitution (2.33) or Replace by T (2.34).
-- Arithmetic is also supported, e.g., `{Arithmetic: m ≤ m + 1}`. The arithmetic formula must always be specified.
+- Arithmetic is also supported, e.g., `{Arithmetic: m ≤ m + 1}`. The arithmetic formula must always be specified. A fact that follows from assumptions is cited with them, e.g., `{Assumption: y > 0, Assumption: r ≥ y, Arithmetic: 0 < r}`.
 
 An implication proved with `assume`:
 
@@ -65,6 +65,8 @@ qed
 Between formulas, `=` means equivalence. Between integers, it means equality. E.g., if `x` and `y` are integers, `x = y ∧ P` means `(x = y) ∧ P`.
 
 Write predicates as `P(i)` or `P(i, j)` and ranged quantifiers as `∀ i : m ≤ i < n : P(i)`, with one dummy/bound variable per quantifier. `Σ` (sum), `Π` (product), and `N` (counting) use integer intervals.
+
+A chain such as `0 ≤ r < y` means `0 ≤ r ∧ r < y`.
 
 Use `state x y : Int, b : Array` to declare program variables. Arrays have integer indices and values. `b[i : j] < x` has the range `[i,j]`. Division `/` is integer division. Powers need a numeral exponent.
 

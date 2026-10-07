@@ -43,20 +43,21 @@ def obligations (init : Option (TSyntax `ptcmd)) (Q P t : TSyntax `ptf)
     out := out.push (if one then "inv" else s!"inv{i}", ← `(ptf| ($P) ∧ ($B) ⇒ wp($S:ptcmd, $P:ptf)),
       { template := s!"P ∧ {bn i} ⇒ wp({sn i}, P)", ante := #[rP, s!"the guard {bn i}"], cmdSym := sn i, postSym := "P" })
   let BB ← guards[1:].foldlM (init := guards[0]!.1) fun acc (B, _) => `(ptf| $acc ∨ $B)
-  let negRole := if one then "the negated guard ¬B" else s!"the negated guards ¬{bbp}"
+  let negRole := if one then "the negated guard ¬B, with B the guard as written in the program"
+    else s!"the negated guards ¬{bbp}, with the guards as written in the program"
   out := out.push ("post", ← `(ptf| ($P) ∧ ¬($BB) ⇒ $(← wpOr fin R)), match fin with
     | some _ => { template := s!"P ∧ ¬{bbp} ⇒ wp(Sf, R)", ante := #[rP, negRole], cmdSym := "Sf", postSym := "R" }
     | none => { template := s!"P ∧ ¬{bbp} ⇒ R", ante := #[rP, negRole], cons := rR })
   out := out.push ("bound", ← `(ptf| ($P) ∧ ($BB) ⇒ 0 < $t),
     { template := s!"P ∧ {bbp} ⇒ 0 < t", ante := #[rP, if one then "the guard B" else s!"the guards {bbs}"],
-      cons := "0 < t for the bound t" })
+      cons := "0 < t", note := "t is the bound of the program" })
   let t1 : TSyntax `ptf ← `(ptf| $(mkIdent `t1):ident)
   let save : TSyntax `ptcmd ← `(ptcmd| $(mkIdent `t1):ident := $t)
   for (B, S) in guards, i in [1:guards.size + 1] do
     out := out.push (if one then "dec" else s!"dec{i}",
       ← `(ptf| ($P) ∧ ($B) ⇒ wp($save:ptcmd; $S:ptcmd, $t < $t1)),
       { template := s!"P ∧ {bn i} ⇒ wp(t1 := t; {sn i}, t < t1)", ante := #[rP, s!"the guard {bn i}"],
-        cmdSym := s!"t1 := t; {sn i}", postSym := "t < t1" })
+        cmdSym := s!"t1 := t; {sn i}", postSym := "t < t1", note := "t is the bound of the program" })
   return out
 
 /-- The Alternative Command Theorem. -/

@@ -913,7 +913,7 @@ def notOneLaw (text : String) (f : Expr) (cited : List (String × Expr)) (assume
     if let some msg ← redundantPart body assumed needed then
       return some (m!"the arithmetic fact `{text}` is two facts, " ++ msg)
     if !arithShape body then
-      return some m!"the arithmetic fact `{text}` is not one law of arithmetic: a relation, an equation between relations or their conjunctions and disjunctions, or an implication from relations to a relation, as in appendix 4. Handle its other connectives with the laws of logic, in steps of their own"
+      return some m!"the arithmetic fact `{text}` is not one law of arithmetic: a relation, an equation with a single relation on one side, or an implication from relations to a relation, as in appendix 4. Handle its other connectives with the laws of logic, in steps of their own"
 
     let citedF := cited.map (·.2)
     let conj (fs : List Expr) : Expr := match fs with
@@ -938,7 +938,7 @@ def notOneLaw (text : String) (f : Expr) (cited : List (String × Expr)) (assume
           | some (a, b) => mkApp2 (mkConst ``PT.Imp) (mkApp2 (mkConst ``And) ante a) b
           | none => mkApp2 (mkConst ``PT.Imp) ante part
       if !relevant.isEmpty && !arithShape whole then
-        return some m!"the arithmetic fact `{text}` with the assumptions cited is not one law of arithmetic: an assumption that is a disjunction is a case analysis, take the cases by Proof by Cases, and a connective in it is for the laws"
+        return some m!"the arithmetic fact `{text}` with the assumptions cited is not one law of arithmetic: an assumption that is a disjunction is a case analysis, take the cases by Proof by Cases, and handle its other connectives with the laws of logic"
 
       let ante := match (normTF part).app2? ``PT.Imp with
         | some (a, _) => leaves ``And a
@@ -1406,6 +1406,11 @@ def failMessage (mv : Move) (f : Fail) (probe : Option LocalDecl → Expr → Ta
           m!"Use it as a formula in the step `(A ⇒ B) = T`"
       return m!"`{X}` is an implication, it justifies a `⇒` step, or as a formula the step `(A ⇒ B) = T`"
     | _ => pure ()
+  -- An arithmetic fact `A ⇒ c` cited for the relation `c` itself.
+  if let (.noMatch, some d) := (f.kind, mv.hyps[0]?) then
+    if let some (_, c) := d.type.app2? ``PT.Imp then
+      if mv.item.startsWith "Arithmetic: " && (a.find? (· == c)).isSome then
+        return m!"`{X}` is an implication, not a rule for{← shown c}\nCite the relation itself with the assumptions it follows from, e.g., \{Assumption: …, Arithmetic: {← Meta.ppExpr c}}"
   match f.kind with
   | .mismatch descr a' _ _ =>
     let other := if f.flipped then "line above" else "next line"
@@ -1421,6 +1426,8 @@ def failMessage (mv : Move) (f : Fail) (probe : Option LocalDecl → Expr → Ta
     let listed := "\n".intercalate (stmts.map fun s => "  " ++ s)
     return m!"`{X}` does not apply to any part of{← shown a}\n{X} is\n{listed}"
   | .open_ =>
+    if let some t := mv.partText then
+      return m!"`{t}` is not one part of the line, so `{X}` cannot apply to it. Group it first, e.g., with \{Associativity}"
     return m!"the instance of `{X}` is not determined by the line and the next line, name the part, `{X}: …`"
   | .noPosition =>
     return m!"`{X}` does not apply at the top of the line or under ∧, ∨, ¬ and ⇒{← shown a}"
@@ -1548,15 +1555,17 @@ partial def checkStep (hintText : String) (hintStx : Syntax := .missing) : Tacti
     if isAssumeHyp d && !cited.any (·.1.fvarId == d.fvarId) then acc.push d else acc
   let unsolved ← saveState
 
-  let probeWith (extra : Array LocalDecl) (c : Expr) : TacticM Bool := do
+  let probeParts (extra : Array (LocalDecl × Expr)) (c : Expr) : TacticM Bool := do
     let s ← saveState
     unsolved.restore
     let ok ← try
-        scopeAssumptions (cited ++ extra.map fun d => (d, d.type))
+        scopeAssumptions (cited ++ extra)
         withMainContext do return (← proveArith c).isSome
       catch _ => pure false
     s.restore
     return ok
+  let probeWith (extra : Array LocalDecl) (c : Expr) : TacticM Bool :=
+    probeParts (extra.map fun d => (d, d.type)) c
   let probe (d? : Option LocalDecl) (c : Expr) : TacticM Bool := probeWith (d?.toArray) c
   let nameOf (d : LocalDecl) : TacticM String := do
     let idx := (d.userName.toString.drop 1).toString.toNat?.getD 0
@@ -1591,14 +1600,23 @@ partial def checkStep (hintText : String) (hintStx : Syntax := .missing) : Tacti
       derived := derived.push needed
     | none =>
 
+      -- Suggest the fewest conjuncts of the assumptions that the fact follows from.
+      let parts := uncited.flatMap fun d => (andLeaves (mkFVar d.fvarId) d.type).map fun (_, ty) => (d, ty)
       let mut names : Array String := #[]
-      for d in uncited do
-        if ← probe (some d) f then names := names.push (← nameOf d); break
-      if names.isEmpty then
-        if ← probeWith uncited f then names := ← uncited.mapM nameOf
+      if ← probeParts parts f then
+        let mut keep := Array.replicate parts.size true
+        for i in [0:parts.size] do
+          let without := (parts.zip (keep.set! i false)).filterMap fun (p, k) => if k then some p else none
+          if ← probeParts without f then keep := keep.set! i false
+        names ← ((parts.zip keep).filter (·.2)).mapM fun ((_, ty), _) => do
+          return toString (← withMainContext (Meta.ppExpr ty))
       unsolved.restore
       if names.isEmpty then
-        throwError "the arithmetic fact `{text}` is not established from the cited assumptions. The checker uses linear arithmetic and may reject true facts involving products of variables. Take a smaller step, or cite what it follows from"
+        let product := (f.find? fun e => e.isAppOfArity ``HMul.hMul 6 &&
+          !(e.getArg! 4).isRawNatLit && !(e.getArg! 4).isAppOfArity ``OfNat.ofNat 3 &&
+          !(e.getArg! 5).isAppOfArity ``OfNat.ofNat 3).isSome
+        let note := if product then " The checker uses linear arithmetic and may reject true facts involving products of variables." else ""
+        throwError "the arithmetic fact `{text}` is not established from the cited assumptions.{note} Take a smaller step, or cite what it follows from"
       let hint' := ", ".intercalate (names.toList.map (s!"Assumption: {·}") ++ [s!"Arithmetic: {text}"])
       throwError "the arithmetic fact `{text}` uses an assumption of the proof, cite it, \{{hint'}}"
   unless factHyps.isEmpty do
@@ -1869,7 +1887,9 @@ syntax (name := ptConcludeTac) "pt_conclude " num num term : tactic
       if ← fit cand e' then accomplished; return
     catch _ => pure ()
     s.restore
+  let underAssume := (← getLCtx).any isAssumeHyp
   let hint := if goalTy.isAppOfArity ``Iff 2 || goalTy.isAppOfArity ``Eq 3 then m!""
+    else if underAssume then m!"\nUnder `assume`, calculate the consequent down to `T`"
     else m!"\nA statement that is not an equation is proved by calculating it down to `T`, or with `assume` (see the README)"
   throwError "the calculation proves{indentExpr ty}\nbut the statement is{indentExpr goalTy}{hint}"
 

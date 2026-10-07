@@ -96,6 +96,8 @@ structure ObRoles where
   cons : String := ""
   cmdSym : String := ""
   postSym : String := ""
+  /-- What a symbol stands for when the student writes the program's own expression. -/
+  note : String := ""
   deriving Inhabited
 
 initialize obRolesExt : EnvExtension (NameMap ObRoles) ← registerEnvExtension (pure {})
@@ -112,7 +114,11 @@ def diagnoseObligation (n : Name) (e σ : Expr) : MetaM (Option String) := do
       | some (x, y) => #[x, y]
       | none => #[oa]) else #[oa]
   let e ← instantiateMVars e
-  let some (sa, sc) := e.app2? ``PT.Imp | return some "it is an implication"
+  let some (sa, sc) := e.app2? ``PT.Imp | do
+    let lhs := (e.iff?.map (·.1)) <|> (e.eq?.map (·.2.1))
+    if lhs.any (·.isAppOfArity ``PT.Imp 2) then
+      return some "bracket its consequent, since `=` binds looser than `⇒`"
+    return some "it is not an implication"
   if parts.size == 2 && sc.isAppOfArity ``PT.Imp 2 && !sa.isAppOfArity ``And 2 then
     return some "write its antecedent as one conjunction"
   let sLeaves := leaves ``And sa
@@ -140,7 +146,7 @@ def diagnoseObligation (n : Name) (e σ : Expr) : MetaM (Option String) := do
     let expectWp := s!"its consequent is not wp({roles.cmdSym}, {roles.postSym})"
     unless sc.isAppOfArity ``PT.wp 4 && oc.isAppOfArity ``PT.wp 4 do return some expectWp
     unless ← sameFormula (sc.getArg! 1) (oc.getArg! 1) do
-      return some s!"inside wp, the command is not {roles.cmdSym}"
+      return some s!"inside wp, the command is not {roles.cmdSym} as written in the program"
     unless ← sameFormula ((sc.getArg! 2).beta #[σ]) ((oc.getArg! 2).beta #[σ]) do
       return some s!"inside wp, the postcondition is not {roles.postSym}"
   else
@@ -250,10 +256,11 @@ def relaxedOptions : CommandElabM Bool := do
           return (false, ← diagnoseObligation fullName e σ)
       unless ok do
         modifyEnv (rejectedExt.modifyState · (·.push fullName))
-        let form := ((obRolesExt.getState (← getEnv)).find? fullName).map (·.template)
+        let roles := (obRolesExt.getState (← getEnv)).find? fullName
         let why := why.map (s!", " ++ ·) |>.getD ""
-        let form := form.map (s!". It has the form " ++ ·) |>.getD ""
-        throwErrorAt stx[4] "this is not the obligation `{fullName}` of `program`{why}{form}"
+        let form := roles.map (s!". It has the form " ++ ·.template) |>.getD ""
+        let note := roles.filter (·.note != "") |>.map (s!", where " ++ ·.note) |>.getD ""
+        throwErrorAt stx[4] "this is not the obligation `{fullName}` of `program {fullName.getPrefix}`{why}{form}{note}"
     else if n.getId.getNumParts > 1 && isObligationName n.getId.getString! then
       let prog := fullName.getPrefix
       let env ← getEnv

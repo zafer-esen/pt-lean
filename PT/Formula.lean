@@ -160,6 +160,26 @@ private def mkEqStx (a b : Syntax) : MacroM Syntax := do
   let b : TSyntax `ptf := ⟨b⟩
   return (← `(ptf| ($a = $b)))
 
+private def connPrec (op : String) : Nat :=
+  match op with
+  | "∧" => 35
+  | "∨" => 30
+  | "⇒" => 25
+  | _ => 20
+
+private def isNegStx (l : Syntax) : Bool := l.getNumArgs == 2 && l[0].isAtom && l[0].getAtomVal == "¬"
+
+/-- Join `l` and `r` by an equation between the rightmost part of `l` and the leftmost part of
+`r`, as the connectives on both sides would group around a relation. -/
+private partial def mergeEq (l r : Syntax) : MacroM Syntax := do
+  match connective? l, connective? r with
+  | some (_, opL, l2, lf), some (r1, opR, _, rf) =>
+    if connPrec opL.getAtomVal > connPrec opR.getAtomVal then return rf.setArg 0 (← mergeEq l r1)
+    else return lf.setArg 2 (← mergeEq l2 r)
+  | some (_, _, l2, lf), none => return lf.setArg 2 (← mergeEq l2 r)
+  | none, some (r1, _, _, rf) => return rf.setArg 0 (← mergeEq l r1)
+  | none, none => if isNegStx l then return l.setArg 1 (← mergeEq l[1] r) else mkEqStx l r
+
 /-- Reassociate integer equations after the variables are in scope. -/
 partial def reassoc (f : Syntax) : TermElabM Syntax := do
   let f := canon f
@@ -173,7 +193,7 @@ partial def reassoc (f : Syntax) : TermElabM Syntax := do
       return ← liftMacroM <| replaceLeftmost r fun c => mkEqStx l c
   else if (connective? l).isSome || isNeg l then
     if (← elabsToInt (rightmost l)) && (← elabsToInt (leftmost r)) then
-      return ← liftMacroM <| replaceLeftmost r fun c => replaceRightmost l fun b => mkEqStx b c
+      return ← liftMacroM <| mergeEq l r
     else if ← elabsToInt (rightmost l) then
       return ← liftMacroM <| replaceRightmost l fun b => mkEqStx b r
   return f
