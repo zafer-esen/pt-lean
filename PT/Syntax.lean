@@ -71,25 +71,30 @@ partial def acNormDeep (e : Expr) : Expr :=
       let b := acNormDeep args[n - 1]!
       let (a, b) := if Expr.lt a b then (a, b) else (b, a)
       mkAppN f (args.extract 0 (n - 2) ++ #[a, b])
-    else if e.isAppOfArity ``Ne 3 then
-      acNormDeep (mkApp (mkConst ``Not) (mkApp3 (mkConst ``Eq f.constLevels!) args[0]! args[1]! args[2]!))
-    else if e.isAppOfArity ``GT.gt 4 then
-      acNormDeep (mkApp4 (mkConst ``LT.lt f.constLevels!) args[0]! args[1]! args[3]! args[2]!)
-    else if e.isAppOfArity ``GE.ge 4 then
-      acNormDeep (mkApp4 (mkConst ``LE.le f.constLevels!) args[0]! args[1]! args[3]! args[2]!)
+    else if let some r := unfoldRelation? e then acNormDeep r
     else mkAppN (acNormDeep f) (args.map acNormDeep)
   | _ => e
 
-/-- Equal up to order, grouping and integer cancellation, as two lines of a trivial step. -/
+/-- Each integer term in its linear normal form, e.g., `r + 1 - y - 1` as `r - y`. Relations are kept as written. -/
+def linearTerms (e : Expr) : MetaM Expr := do
+  let ctx ← Meta.Simp.mkContext { arith := true } #[] (← Meta.getSimpCongrTheorems)
+  Meta.transform e (pre := fun t => do
+    let intOp := (t.isAppOfArity ``HAdd.hAdd 6 || t.isAppOfArity ``HSub.hSub 6 || t.isAppOfArity ``HMul.hMul 6 ||
+      t.isAppOfArity ``Neg.neg 3) && (t.getArg! 0).isConstOf ``Int
+    if intOp then return .done (← Meta.simp t ctx).1.expr
+    return .continue)
+
+/-- Equal up to order, grouping and linear integer arithmetic in terms. -/
 def sameFormula (a b : Expr) : MetaM Bool := do
   if ← (try Meta.isDefEq a b catch _ => pure false) then return true
   let norm (e : Expr) : MetaM Expr := do
     let e ← instantiateMVars e
     let e ← try pure (← intNormalize e).expr catch _ => pure e
+    let e ← try linearTerms e catch _ => pure e
     return acNormDeep e
   return (← norm a) == (← norm b)
 
-/-- Roles of the parts of a program obligation, in the notation of the appendix. -/
+/-- Roles of the parts of a program obligation. -/
 structure ObRoles where
   template : String
   ante : Array String
@@ -98,9 +103,18 @@ structure ObRoles where
   postSym : String := ""
   /-- What a symbol stands for when the student writes the program's own expression. -/
   note : String := ""
+  /-- The command, `program` or `proc`, that the obligation belongs to. -/
+  owner : String := "program"
   deriving Inhabited
 
 initialize obRolesExt : EnvExtension (NameMap ObRoles) ← registerEnvExtension (pure {})
+
+/-- The antecedent `A₁ ∧ … ∧ Aₖ` of an obligation with `k` roles. -/
+private def anteParts : Nat → Expr → Array Expr
+  | k + 2, e => match e.app2? ``And with
+    | some (x, y) => #[x] ++ anteParts (k + 1) y
+    | none => #[e]
+  | _, e => #[e]
 
 /-- Say which part of statement `e` differs from obligation `n`, without showing the obligation. -/
 def diagnoseObligation (n : Name) (e σ : Expr) : MetaM (Option String) := do
@@ -110,16 +124,14 @@ def diagnoseObligation (n : Name) (e σ : Expr) : MetaM (Option String) := do
   let some v := (env.find? (n ++ `ob)).bind (·.value?) | return none
   let ob ← Meta.instantiateLambda v #[σ]
   let some (oa, oc) := ob.app2? ``PT.Imp | return none
-  let parts := if roles.ante.size == 2 then (match oa.app2? ``And with
-      | some (x, y) => #[x, y]
-      | none => #[oa]) else #[oa]
+  let parts := anteParts roles.ante.size oa
   let e ← instantiateMVars e
   let some (sa, sc) := e.app2? ``PT.Imp | do
     let lhs := (e.iff?.map (·.1)) <|> (e.eq?.map (·.2.1))
     if lhs.any (·.isAppOfArity ``PT.Imp 2) then
       return some "bracket its consequent, since `=` binds looser than `⇒`"
     return some "it is not an implication"
-  if parts.size == 2 && sc.isAppOfArity ``PT.Imp 2 && !sa.isAppOfArity ``And 2 then
+  if parts.size ≥ 2 && sc.isAppOfArity ``PT.Imp 2 && !sa.isAppOfArity ``And 2 then
     return some "write its antecedent as one conjunction"
   let sLeaves := leaves ``And sa
   let mut used := sLeaves.map fun _ => false
@@ -135,9 +147,7 @@ def diagnoseObligation (n : Name) (e σ : Expr) : MetaM (Option String) := do
     for (m, r) in siblings do
       let some w := (env.find? (m ++ `ob)).bind (·.value?) | continue
       let some (ma, _) := (← Meta.instantiateLambda w #[σ]).app2? ``PT.Imp | continue
-      let mparts := if r.ante.size == 2 then (match ma.app2? ``And with
-          | some (x, y) => #[x, y]
-          | none => #[ma]) else #[ma]
+      let mparts := anteParts r.ante.size ma
       for mp in mparts, role in r.ante do
         if (← (leaves ``And mp).anyM (sameFormula · l)) && !roles.ante.contains role then
           return some s!"its antecedent has {role}, which belongs to another obligation"
@@ -153,7 +163,7 @@ def diagnoseObligation (n : Name) (e σ : Expr) : MetaM (Option String) := do
     unless ← sameFormula sc oc do return some s!"its consequent is not {roles.cons}"
   return none
 
-/-- Compare with `n.ob` up to order, grouping and integer cancellation. Accept if no obligation exists. -/
+/-- Compare with `n.ob` by `sameFormula`. Accept if no obligation exists. -/
 def statesObligation (n : Name) : CommandElabM Bool := do
   let env ← getEnv
   let some ci := env.find? n | return false
@@ -168,14 +178,22 @@ def statesObligation (n : Name) : CommandElabM Bool := do
 /-- Obligation proofs rejected for their statement, reported by `verified` instead of "missing". -/
 initialize rejectedExt : EnvExtension (Array Name) ← registerEnvExtension (pure #[])
 
-/-- Names of the obligations that `program` generates. -/
+/-- Names of the obligations generated by `program` and `proc`. -/
 def isObligationName (s : String) : Bool :=
   let base := String.ofList (s.toList.takeWhile Char.isAlpha)
   let num := String.ofList (s.toList.dropWhile Char.isAlpha)
   (num.isEmpty || num.isNat) &&
-    (["inv", "dec", "branch"].contains base || (num.isEmpty && ["init", "post", "bound", "guards"].contains base))
+    (["inv", "dec", "branch", "before", "after"].contains base ||
+      (num.isEmpty && ["init", "post", "bound", "guards", "body"].contains base))
+
+/-- Every `program` and `proc` has one of these obligations. -/
+def firstObligations : List Name := [`init, `guards, `before, `body]
+
+def noProgramMessage (name : Name) : String :=
+  s!"there is no `program {name}` or `proc {name}` without errors"
 
 structure ProofCheck where
+  owner : String := "program"
   rejected : Bool := false
   present : Bool := false
   block : Bool := false
@@ -190,7 +208,7 @@ def ProofCheck.issue? (c : ProofCheck) : Option String :=
   else if !c.complete then some "not proved"
   else if c.axiomatic then some "rests on an axiom of the file"
   else if c.relaxed then some "checked with weakened options"
-  else if !c.matchesObligation then some "does not state the obligation of `program`"
+  else if !c.matchesObligation then some s!"its statement is not the obligation of `{c.owner}`"
   else none
 
 def checkProof (n : Name) : CommandElabM ProofCheck := do
@@ -199,6 +217,7 @@ def checkProof (n : Name) : CommandElabM ProofCheck := do
   unless ci.isTheorem do return { present := true }
   let axioms ← liftCoreM (collectAxioms n)
   return {
+    owner := ((obRolesExt.getState env).find? n).elim "program" (·.owner)
     present := true
     block := proofTag.hasTag env n
     complete := !axioms.contains ``sorryAx
@@ -236,7 +255,11 @@ def relaxedOptions : CommandElabM Bool := do
       if ← Meta.isProp ty then
         throwErrorAt stx[2] "`{← Meta.ppExpr ty}` is an assumption, not a variable. Write it in an `assume` line"
 
-  let stmt : TSyntax `ptf ← liftTermElabM <| Term.withAutoBoundImplicit <|
+  let declName? := name?.map ((← getCurrNamespace) ++ ·.getId)
+  let asProof {α} (x : TermElabM α) : TermElabM α := match declName? with
+    | some n => Term.withDeclName n x
+    | none => x
+  let stmt : TSyntax `ptf ← liftTermElabM <| asProof <| Term.withAutoBoundImplicit <|
     Term.elabBinders binders fun _ => do pure ⟨← reassoc stx[4]⟩
   let stmt : TSyntax `ptf := ⟨stripParens stmt⟩
   let assumptions : Array (TSyntax `ptf) :=
@@ -246,7 +269,7 @@ def relaxedOptions : CommandElabM Bool := do
     let ob := fullName ++ `ob
     if (← getEnv).contains ob then
       let some stName := stName? | throwError "no `state` declared"
-      let (ok, why) ← liftTermElabM do
+      let (ok, why) ← liftTermElabM <| asProof do
         Term.withAutoBoundImplicit <| Meta.withLocalDeclD `σ (mkConst stName) fun σ => do
           let e ← Term.elabTerm (← `(⟪$stmt⟫)) (some (mkSort .zero))
           Term.synthesizeSyntheticMVarsNoPostponing
@@ -260,14 +283,15 @@ def relaxedOptions : CommandElabM Bool := do
         let why := why.map (s!", " ++ ·) |>.getD ""
         let form := roles.map (s!". It has the form " ++ ·.template) |>.getD ""
         let note := roles.filter (·.note != "") |>.map (s!", where " ++ ·.note) |>.getD ""
-        throwErrorAt stx[4] "this is not the obligation `{fullName}` of `program {fullName.getPrefix}`{why}{form}{note}"
+        let owner := roles.elim "program" (·.owner)
+        throwErrorAt stx[4] "this is not the obligation `{fullName}` of `{owner} {fullName.getPrefix}`{why}{form}{note}"
     else if n.getId.getNumParts > 1 && isObligationName n.getId.getString! then
       let prog := fullName.getPrefix
       let env ← getEnv
-      let isProgram := env.contains (prog ++ `init.ob) || env.contains (prog ++ `guards.ob)
+      let isProgram := firstObligations.any fun ob => env.contains (prog ++ ob ++ `ob)
       logWarningAt n (if isProgram then
           m!"`{prog}` has no obligation `{n.getId.getString!}`, so this is checked as an ordinary proof"
-        else m!"there is no `program {prog}`, so this is checked as an ordinary proof")
+        else m!"{noProgramMessage prog}, so this is checked as an ordinary proof")
   let steps := stx[7].getArgs
 
   if stx[6].getNumArgs == 0 && !steps.isEmpty then

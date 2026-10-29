@@ -230,7 +230,19 @@ syntax (name := ptTrans) "pt_trans% " term:max term:max : term
 def stateName? : TermElabM (Option Name) := do
   try pure (some (← realizeGlobalConstNoOverload (mkIdent `St))) catch _ => pure none
 
-/-- State fields become `σ.x`. Predicates and bound functions become `P σ`. -/
+/-- The annotations of each program by their names, e.g., `Q` for `{Q : …}`. -/
+initialize annotationsExt : EnvExtension (NameMap (Array (Name × Syntax))) ← registerEnvExtension (pure {})
+
+/-- In a proof named `X.…`, an annotation name of program `X` is replaced by its formula. -/
+def annotation? (x : Name) : TermElabM (Option Syntax) := do
+  let some decl ← Term.getDeclName? | return none
+  let some annots := (annotationsExt.getState (← getEnv)).find? decl.getPrefix | return none
+  match annots.filter (·.1 == x) with
+  | #[] => return none
+  | #[(_, f)] => return some f
+  | _ => throwError "`{x}` is the name of more than one annotation of `{decl.getPrefix}`"
+
+/-- State fields become `σ.x`. Predicates and bound functions become `P σ`. Annotation names become their formulas. -/
 syntax (name := ptVar) "pt_var% " ident : term
 @[term_elab ptVar] def elabPtVar : TermElab := fun stx expectedType? => do
   let x : Ident := ⟨stx[1]⟩
@@ -248,6 +260,7 @@ syntax (name := ptVar) "pt_var% " ident : term
   else if let some st ← stateName? then
     if (← getEnv).contains (st ++ x.getId) then
       elabTerm (← `($(mkIdent (st ++ x.getId)) $σ)) expectedType?
+    else if let some f ← annotation? x.getId then elabTerm (← `(⟪($(⟨f⟩))⟫)) expectedType?
     else plain
   else plain
 

@@ -33,7 +33,7 @@ def reduceFields (e : Expr) : MetaM Expr := do
     let some info := env.getProjectionFnInfo? n | return .done e
     unless e.getAppNumArgs == info.numParams + 1 do return .done e
     let some (.ctorInfo _) := e.appArg!.getAppFn.constName?.bind env.find? | return .done e
-    return .done (← whnfR e))
+    return .done e.appArg!.getAppArgs[info.numParams + info.i]!)
 
 def displayForm (e : Expr) : MetaM Expr := do
   let env ← getEnv
@@ -197,9 +197,9 @@ def impVariants (e ty : Expr) : MetaM (Array Expr) := do
 syntax "pt_ac" : tactic
 macro_rules
   | `(tactic| pt_ac) => `(tactic| first
-      | (refine Iff.of_eq ?_; simp only [and_comm, and_left_comm, and_assoc, or_comm, or_left_comm, or_assoc, iff_comm]; done)
-      | (refine PT.Imp.of_eq ?_; simp only [and_comm, and_left_comm, and_assoc, or_comm, or_left_comm, or_assoc, iff_comm]; done)
-      | (simp only [and_comm, and_left_comm, and_assoc, or_comm, or_left_comm, or_assoc, iff_comm]; done))
+      | (refine Iff.of_eq ?_; simp only [ge_iff_le, gt_iff_lt, ne_eq, and_comm, and_left_comm, and_assoc, or_comm, or_left_comm, or_assoc, iff_comm]; done)
+      | (refine PT.Imp.of_eq ?_; simp only [ge_iff_le, gt_iff_lt, ne_eq, and_comm, and_left_comm, and_assoc, or_comm, or_left_comm, or_assoc, iff_comm]; done)
+      | (simp only [ge_iff_le, gt_iff_lt, ne_eq, and_comm, and_left_comm, and_assoc, or_comm, or_left_comm, or_assoc, iff_comm]; done))
 
 def focusMain (tac : TacticM Unit) : TacticM Bool := do
   let s ← saveState
@@ -228,8 +228,19 @@ def stepSides (ty : Expr) : Option (Expr × Expr) :=
       | some (_, a, b) => some (a, b)
       | none => none
 
+/-- `x ≥ y` as `y ≤ x`, `x > y` as `y < x` and `x ≠ y` as `¬(x = y)`, equal by definition. -/
+def unfoldRelation? (e : Expr) : Option Expr :=
+  let args := e.getAppArgs
+  if e.isAppOfArity ``GE.ge 4 then
+    some (mkApp4 (mkConst ``LE.le e.getAppFn.constLevels!) args[0]! args[1]! args[3]! args[2]!)
+  else if e.isAppOfArity ``GT.gt 4 then
+    some (mkApp4 (mkConst ``LT.lt e.getAppFn.constLevels!) args[0]! args[1]! args[3]! args[2]!)
+  else if e.isAppOfArity ``Ne 3 then
+    some (mkNot (mkApp3 (mkConst ``Eq e.getAppFn.constLevels!) args[0]! args[1]! args[2]!))
+  else none
+
 /-- The tactic can prove more than the implicit laws. Limit it with this AC normal form. -/
-partial def acNorm (e : Expr) : Expr :=
+partial def acNorm (e : Expr) (unfold : Bool := true) : Expr :=
   let cluster (op : Name) : Option (Array Expr) :=
     if e.isAppOfArity op 2 then
       let rec flat (e : Expr) : Array Expr :=
@@ -241,21 +252,22 @@ partial def acNorm (e : Expr) : Expr :=
   match cluster ``And <|> cluster ``Or with
   | some ops =>
     let op := if e.isAppOfArity ``And 2 then ``And else ``Or
-    let ops := (ops.map acNorm).qsort (fun a b => Expr.lt a b)
+    let ops := (ops.map (acNorm · unfold)).qsort (fun a b => Expr.lt a b)
     ops.foldr (init := none) (fun x acc => match acc with
       | none => some x
       | some a => some (mkApp2 (mkConst op) x a)) |>.get!
   | none =>
     match e.iff? with
     | some (a, b) =>
-      let a := acNorm a
-      let b := acNorm b
+      let a := acNorm a unfold
+      let b := acNorm b unfold
       if Expr.lt a b then mkApp2 (mkConst ``Iff) a b else mkApp2 (mkConst ``Iff) b a
     | none =>
-      match e with
-      | .app f a => .app (acNorm f) (acNorm a)
-      | .mdata _ b => acNorm b
-      | _ => e
+      if let some r := (if unfold then unfoldRelation? e else none) then acNorm r
+      else match e with
+        | .app f a => .app (acNorm f unfold) (acNorm a unfold)
+        | .mdata _ b => acNorm b unfold
+        | _ => e
 
 def goalIsACEqual : TacticM Bool := do
   let some (a, b) := stepSides (← instantiateMVars (← getMainTarget)) | return false
@@ -323,7 +335,7 @@ def arithScript : TacticM Unit := do
         eq_self_iff_true, ite_true, ite_false, iff_true, true_iff, iff_false, false_iff, implies_true,
         true_implies, false_implies, not_true_eq_false, not_false_eq_true, Int.pow_succ,
         Int.pow_zero, Int.add_mul, Int.mul_add, Int.sub_mul, Int.mul_sub, Int.one_mul, Int.mul_one,
-        Int.zero_mul, Int.mul_zero, Int.mul_comm] at *) <;>
+        Int.zero_mul, Int.mul_zero, Int.mul_comm, Int.mul_assoc, Int.mul_left_comm] at *) <;>
       first | omega | (constructor <;> intro _ <;> omega) | (split <;> omega)
             | simp +arith only [ne_eq, eq_self_iff_true, not_true_eq_false, not_false_eq_true]
             | (intros; simp_all only [Int.mul_zero, Int.zero_mul]; first | done | omega)))
@@ -333,7 +345,7 @@ def arithScript : TacticM Unit := do
         true_implies, false_implies, and_true, true_and, and_false, false_and, or_true, true_or,
         or_false, false_or, not_true_eq_false, not_false_eq_true, Int.pow_succ,
         Int.pow_zero, Int.add_mul, Int.mul_add, Int.sub_mul, Int.mul_sub, Int.one_mul, Int.mul_one,
-        Int.zero_mul, Int.mul_zero, Int.mul_comm] at *) <;>
+        Int.zero_mul, Int.mul_zero, Int.mul_comm, Int.mul_assoc, Int.mul_left_comm] at *) <;>
       first | omega | (constructor <;> intro _ <;> omega) | (split <;> omega)
             | simp +arith only [ne_eq, eq_self_iff_true, not_true_eq_false, not_false_eq_true]
             | (intros; simp_all only [Int.mul_zero, Int.zero_mul]; first | done | omega)))
@@ -409,6 +421,8 @@ inductive FailKind
   | mismatch (descr : MessageData) (result : Expr) (back failed : Bool)
 
   | noPosition
+  /-- An assignment over a postcondition that still has this `wp` inside. -/
+  | innerFirst (inner : Expr)
 
 structure Fail where
   line : Expr
@@ -424,7 +438,7 @@ def FailKind.rank : FailKind → Nat
   | .condition _ true _ => 6
   | .mismatch _ _ false false => 5
   | .condition .. | .mismatch _ _ false true => 4
-  | .open_ => 3
+  | .open_ | .innerFirst _ => 3
   | .noMatch | .noPosition => 2
   -- a theorem read from right to left fits many lines, and rarely tells anything
   | .mismatch _ _ true _ => 1
@@ -624,6 +638,15 @@ partial def andLeaves (pf ty : Expr) : Array (Expr × Expr) :=
   | some (a, b) => andLeaves (mkApp3 (mkConst ``And.left) a b pf) a ++ andLeaves (mkApp3 (mkConst ``And.right) a b pf) b
   | none => #[(pf, ty)]
 
+partial def proofOf (leaves : Array (Expr × Expr)) (a : Expr) : MetaM (Option Expr) := do
+  for (pf, ty) in leaves do
+    if ← isDefEq ty a then return some pf
+  if let some (x, y) := a.app2? ``And then
+    if let some px ← proofOf leaves x then
+      if let some py ← proofOf leaves y then
+        return some (mkApp4 (mkConst ``And.intro) x y px py)
+  return none
+
 /-- Descend through a shared connective or binder into the single part that changes. -/
 def zoomIn : TacticM Bool := do
   let s ← saveState
@@ -705,6 +728,15 @@ def proveArith (f : Expr) (hide : Array FVarId := #[]) : TacticM (Option Expr) :
   catch _ => pure ()
   s.restore
   return none
+
+def equalByArith (a b : Expr) : TermElabM Bool := do
+  let g ← mkFreshExprMVar (mkIff a b)
+  try
+    let rest ← Tactic.run g.mvarId! do
+      evalTactic (← `(tactic| intros))
+      arithScript
+    return rest.isEmpty
+  catch _ => return false
 
 def normTF (e : Expr) : Expr :=
   let e := e.consumeMData
@@ -870,9 +902,8 @@ Keep antecedent atoms distinct to avoid treating consequences as assumptions. -/
 def mergedAtoms (atoms : Array Expr) (hide : Array FVarId) (fixed : Array Expr) (ctx : Array Expr) : TacticM (Array (Nat × Bool)) := do
   let same (a b : Expr) : TacticM Bool := do
     let plain := (← decidedUnder #[] (mkApp2 (mkConst ``Iff) a b) hide) == some true
-    if fixed.contains a || fixed.contains b then
-      if plain || ctx.isEmpty then return false
-      return (← decidedUnder ctx (mkApp2 (mkConst ``Iff) a b) hide) == some true
+    -- an assumption or antecedent is never merged, a fact concluded from it is arithmetic
+    if fixed.contains a || fixed.contains b then return false
     if plain then return true
     return (← decidedUnder ctx (mkApp2 (mkConst ``Iff) a b) hide) == some true
   let mut cls : Array (Nat × Bool) := #[]
@@ -938,7 +969,9 @@ def notOneLaw (text : String) (f : Expr) (cited : List (String × Expr)) (assume
           | some (a, b) => mkApp2 (mkConst ``PT.Imp) (mkApp2 (mkConst ``And) ante a) b
           | none => mkApp2 (mkConst ``PT.Imp) ante part
       if !relevant.isEmpty && !arithShape whole then
-        return some m!"the arithmetic fact `{text}` with the assumptions cited is not one law of arithmetic: an assumption that is a disjunction is a case analysis, take the cases by Proof by Cases, and handle its other connectives with the laws of logic"
+        if relevant.any fun c => (normTF c).isAppOfArity ``Or 2 then
+          return some m!"the arithmetic fact `{text}` with the assumptions cited is not one law of arithmetic: an assumption that is a disjunction is a case analysis, take the cases by Proof by Cases, and handle its other connectives with the laws of logic"
+        return some m!"the arithmetic fact `{text}` with the assumptions cited is not one law of arithmetic. With the assumptions as antecedent, the conclusion of a law is a relation, a conjunction of relations, or an equation with a single relation on one side. Write the fact as such an equation, or handle its other connectives with the laws of logic"
 
       let ante := match (normTF part).app2? ``PT.Imp with
         | some (a, _) => leaves ``And a
@@ -974,6 +1007,7 @@ def elabFact (text : String) : TacticM (Option Expr) := do
       if env.contains id || env.contains (`PT ++ id) then continue
       if let some st := stName? then
         if env.contains (st ++ id) then continue
+      if (← annotation? id).isSome then continue
       unless dummies.contains id do dummies := dummies.push id
     let decls : Array (Name × (Array Expr → TacticM Expr)) := dummies.map fun n => (n, fun _ => pure (mkConst ``Int))
     withLocalDeclsD decls fun xs => do
@@ -1006,28 +1040,45 @@ def lawStatement (c : Name) : MetaM String := do
   if c == ``PT.DefinitionOfAssignment then
     return "wp(x := e, R) = R with e substituted for x, and likewise for x₁, x₂ := e₁, e₂"
   let some ci := (← getEnv).find? c | return toString c
-  forallTelescope ci.type fun _ body => do
+  forallTelescope ci.type fun xs body => do
     let body := match body.app2? ``PT.Imp with
       | some (_, b) => if b.isAppOfArity ``Iff 2 || b.isAppOfArity ``Eq 3 then b else body
       | none => body
+    -- A predicate on states applied to a state is printed as the formula, `R` for `R s`.
+    let mut preds : Array (Expr × Name) := #[]
+    for p in xs do
+      if let .forallE _ dom (.sort .zero) _ ← whnfR (← inferType p) then
+        if dom.isFVar && (← inferType dom).isSort then
+          preds := preds.push (p, (← p.fvarId!.getDecl).userName)
+    let body := body.replace fun e =>
+      if e.isApp && e.getAppNumArgs == 1 then (preds.find? (·.1 == e.appFn!)).map (mkConst ·.2) else none
     return toString (← ppExpr body)
 
-/-- Use only cited assumptions, including their conjuncts. -/
+/-- Use only cited assumptions, including their conjuncts. A cited conjunction of
+assumptions is added as an assumption of its own. -/
 def scopeAssumptions (cited : Array (LocalDecl × Expr)) : TacticM Unit := withMainContext do
   let mut goal ← getMainGoal
   let mut hyps : Array Hypothesis := #[]
   let mut clear : Array FVarId := #[]
+  let mut kept : Array (Expr × Expr) := #[]
   for d in ← getLCtx do
     unless isAssumeHyp d do continue
     let fs := cited.filterMap fun (o, f) => if o.fvarId == d.fvarId then some f else none
     if fs.isEmpty then clear := clear.push d.fvarId; continue
-    unless d.type.isAppOfArity ``And 2 do continue
+    unless d.type.isAppOfArity ``And 2 do kept := kept.push (mkFVar d.fvarId, d.type); continue
 
     let whole ← fs.anyM fun f => withReducible (isDefEq f d.type)
+    let parts := fs.flatMap fun f => (andLeaves (mkConst ``True) f).map (·.2)
     for (pf, ty) in andLeaves (mkFVar d.fvarId) d.type, i in [0:100] do
-      if whole || (← fs.anyM fun f => withReducible (isDefEq f ty)) then
+      if whole || (← parts.anyM fun f => withReducible (isDefEq f ty)) then
         hyps := hyps.push { userName := Name.mkSimple s!"{d.userName}_{i + 1}", type := ty, value := pf }
-    unless whole do clear := clear.push d.fvarId
+    if whole then kept := kept.push (mkFVar d.fvarId, d.type) else clear := clear.push d.fvarId
+  kept := kept ++ hyps.map fun h => (h.value, h.type)
+  for (_, f) in cited, j in [0:cited.size] do
+    unless ← kept.anyM fun (_, ty) => withReducible (isDefEq ty f) do
+      if let some pf ← withReducible (proofOf kept f) then
+        hyps := hyps.push { userName := Name.mkSimple s!"h_{j + 1}", type := f, value := pf }
+        kept := kept.push (pf, f)
   goal := (← goal.assertHypotheses hyps).2
   for f in clear do goal ← goal.tryClear f
   replaceMainGoal [goal]
@@ -1038,6 +1089,7 @@ structure Src where
   schema : Bool := false
   /-- An implication used as the formula `(X ⇒ Y) = T` may match `X` and `Y` up to grouping. -/
   regroup : Bool := false
+  law : Name := .anonymous
 
 /-- Regroupings of an `∨` or `∧` chain with one operand first or last, e.g., `q ∨ (p ∨ r)` as
 `p ∨ (q ∨ r)` and `(q ∨ r) ∨ p`. -/
@@ -1119,7 +1171,7 @@ def sourcesOf (mv : Move) (isImp : Bool) : TacticM (Array Src) := do
       if kind == .schema then
         out := out.push { name := s!"`{mv.item}`", make := do pure #[← instantiateLaw c], schema := true }
       else
-        out := out.push { name := s!"`{mv.item}`", make := do
+        out := out.push { name := s!"`{mv.item}`", law := c, make := do
           let (e, ty) ← instantiateLaw c
           (← acVariants e ty).mapM fun v => do pure (v, ← instantiateMVars (← inferType v)) }
       -- the law is also a formula equal to `T`, with its condition as the antecedent
@@ -1165,6 +1217,12 @@ def sourcesOf (mv : Move) (isImp : Bool) : TacticM (Array Src) := do
           vs := vs ++ (← (← acVariants e body).mapM fun v => do pure (v, ← instantiateMVars (← inferType v)))
       pure vs }
   return out
+
+/-- The `wp` inside the postcondition of `wp(S, R)`. Substituting an assignment first would
+move it to another state. -/
+def wpInsidePost? (e : Expr) : Option Expr :=
+  if e.isAppOfArity ``PT.wp 4 then ((e.getArg! 2).beta #[e.getArg! 3]).find? (·.isAppOfArity ``PT.wp 4)
+  else none
 
 /-- Try one variant and direction. `inNext` requires its result in the next line. -/
 def attempt (src : Src) (vs : Array (Expr × Expr)) (i : Nat) (symm : Bool) (u? : Option Expr) (a : Expr)
@@ -1216,6 +1274,14 @@ def attempt (src : Src) (vs : Array (Expr × Expr)) (i : Nat) (symm : Bool) (u? 
       match u? with
       | some u =>
         unless ← isDefEq pat u do return ← fail .noMatch
+        if src.law == ``PT.DefinitionOfAssignment then
+          if let some inner := wpInsidePost? u then return ← fail (.innerFirst inner)
+        -- Rewrite the part as written, e.g., `0 ≤ r` for `r ≥ 0`.
+        let p ← instantiateMVars pat
+        if p != u && (← withReducible (isDefEq p u)) then
+          let (l, r) ← if symm then pure (← instantiateMVars l, u) else pure (u, ← instantiateMVars r)
+          let ty ← if vty.isAppOfArity ``Iff 2 then pure (mkApp2 (mkConst ``Iff) l r) else mkEq l r
+          v ← mkExpectedTypeHint v ty
       | none =>
 
         unless isBare pat do return ← fail .noMatch
@@ -1438,6 +1504,8 @@ def failMessage (mv : Move) (f : Fail) (probe : Option LocalDecl → Expr → Ta
     return m!"the instance of `{X}` is not determined by the line and the next line, name the part, `{X}: …`"
   | .noPosition =>
     return m!"`{X}` does not apply at the top of the line or under ∧, ∨, ¬ and ⇒{← shown a}"
+  | .innerFirst inner =>
+    return m!"`{X}` is applied to the innermost wp first, here{← shown inner}\nTake it in a step of its own"
   | .condition c _ _ =>
 
     let listed := (pt.assumed.get (← getOptions)).splitOn "\u0001" |>.filter (· ≠ "")
@@ -1478,13 +1546,19 @@ def failMessage (mv : Move) (f : Fail) (probe : Option LocalDecl → Expr → Ta
     let ask := if needFact then "cite what it follows from" else "cite the assumption"
     return m!"`{X}` needs{← shown c}\n{ask}, \{{hint}}"
 
+/-- `Definition of Q` for an annotation name `Q`. The name is expanded on reading, so the step is an identity. -/
+def annotationDefinition? (item : String) : TermElabM Bool := do
+  let t := item.trimAscii.toString
+  unless t.toLower.startsWith "definition of " do return false
+  return (← annotation? ((t.drop 14).toString.trimAscii.toString.toName)).isSome
+
 partial def checkStep (hintText : String) (hintStx : Syntax := .missing) : TacticM Unit := do
   let env ← getEnv
   let opts ← getOptions
   let maxSec := pt.sections.get opts
   let goal ← getMainGoal
   let goalTy ← instantiateMVars (← goal.getType)
-  let some (a, _) := stepSides goalTy | throwError "not a step"
+  let some (a, b) := stepSides goalTy | throwError "not a step"
   let isImp := goalTy.isAppOfArity ``PT.Imp 2
   let items := parseHint hintText
   if items.isEmpty then throwError "empty hint"
@@ -1500,9 +1574,16 @@ partial def checkStep (hintText : String) (hintStx : Syntax := .missing) : Tacti
   let mut order : Array (Nat × Nat) := #[]
 
   let mut helperItems : Array Nat := #[]
+  let mut rewriters : Array (String × String) := #[]
   for (name, part) in items do
     let k := normalizeHint name
     if k == "conditionalsubstitution" then condSubst := true; continue
+    -- all occurrences of an assumption or fact are replaced at once, so a repeated one is skipped
+    if let some t := part then
+      if k == "arithmetic" || k == "arith" || isAssumptionKey k then
+        let item := (if isAssumptionKey k then "assumption" else "arithmetic", t.trimAscii.toString)
+        if rewriters.contains item then continue
+        rewriters := rewriters.push item
     if k == "arithmetic" || k == "arith" then
       acOnly := false
       let some text := part | throwError "`{name}` names the arithmetic fact it uses, as `Arithmetic: m ≤ m + 1`"
@@ -1515,18 +1596,24 @@ partial def checkStep (hintText : String) (hintStx : Syntax := .missing) : Tacti
       let some text := part | throwError "`{name}` names the assumption it uses, as `Assumption: p`"
       let some f ← elabHintFormula text | throwError "`{text}` is not a formula of this proof"
 
+      -- a conjunction of assumptions is an assumption, e.g., `0 < Y ≤ X`
+      let parts := (andLeaves (mkConst ``True) f).map (·.2)
       let mut hyps : Array LocalDecl := #[]
+      let mut known : Array (Expr × Expr) := #[]
       for d in ← getLCtx do
         if isAssumeHyp d then
-          if ← (#[(mkFVar d.fvarId, d.type)] ++ andLeaves (mkFVar d.fvarId) d.type).anyM fun (_, ty) => withReducible (isDefEq ty f) then
+          let ls := #[(mkFVar d.fvarId, d.type)] ++ andLeaves (mkFVar d.fvarId) d.type
+          if ← ls.anyM fun (_, ty) => (parts.push f).anyM fun p => withReducible (isDefEq ty p) then
             hyps := hyps.push d
-      if hyps.isEmpty then
+            known := known ++ ls
+      if (← withReducible (proofOf known f)).isNone then
         let line := if listed.isEmpty then m!"" else m!", the `assume` line has {", ".intercalate listed}"
         throwError "`{text}` is not an assumption of this proof{line}"
       order := order.push (1, assumptions.size)
       assumptions := assumptions.push { item := "Assumption: " ++ text, hyps := hyps, part := some f }
       continue
-    let names := lookupHint env name maxSec (← getCurrNamespace)
+    let ns ← getCurrNamespace
+    let names := if ← annotationDefinition? name then #[``PT.Identity] else lookupHint env name maxSec ns
     if names.isEmpty then throwError (unknownHint env name maxSec)
     addHintInfo hintStx hintText name names[0]!
     for n in names do
@@ -1561,6 +1648,18 @@ partial def checkStep (hintText : String) (hintStx : Syntax := .missing) : Tacti
   let uncited := (← getLCtx).foldl (init := #[]) fun acc d =>
     if isAssumeHyp d && !cited.any (·.1.fvarId == d.fvarId) then acc.push d else acc
   let unsolved ← saveState
+  let mut eq := false
+  unless acOnly do
+    let byAC ← (pure (← closeByRfl) <||> closeByAC)
+    unsolved.restore
+    eq ← closeStep
+    unsolved.restore
+    if byAC || (eq && facts.isEmpty) then
+      let asWritten (e : Expr) : TacticM Expr := do
+        return acNorm (← try pure (← intNormalize e).expr catch _ => pure e) false
+      let unfolded := if (← asWritten a) == (← asWritten b) then "" else
+        " `x ≥ y` is the same formula as `y ≤ x`, `x > y` as `y < x` and `x ≠ y` as `¬(x = y)`."
+      throwError "the two lines are already equal, up to order, grouping and integer cancellation, so {hint} is not applied.{unfolded} A trivial step is justified by \{Identity}, \{Commutativity} or \{Associativity}"
 
   let probeParts (extra : Array (LocalDecl × Expr)) (c : Expr) : TacticM Bool := do
     let s ← saveState
@@ -1594,8 +1693,9 @@ partial def checkStep (hintText : String) (hintStx : Syntax := .missing) : Tacti
             unless rels.contains r do rels := rels.push r
       pure rels
     if rels.size > arithLimit then
+      let shown ← withMainContext <| rels.mapM fun r => return s!"`{← Meta.ppExpr r}`"
       unsolved.restore
-      throwError "the arithmetic fact `{text}` involves {rels.size} different relations, at most {arithLimit} are allowed at a time, counting the assumptions cited. Take a smaller step"
+      throwError "in the arithmetic fact `{text}` with the assumptions cited, there are {rels.size} different relations, {", ".intercalate shown.pop.toList} and {shown.back!}, and at most {arithLimit} are allowed at a time. Take a smaller step"
     match ← withMainContext (proveArith f) with
     | some pf =>
       let needed := pf.hasAnyFVar (assumed.contains ·)
@@ -1664,10 +1764,14 @@ partial def checkStep (hintText : String) (hintStx : Syntax := .missing) : Tacti
   for (kind, i) in order do
     match kind with
     | 1 =>
-      if assumptionsRewrite then
-        let mv := assumptions[i]!
-        let some f := mv.part | continue
-        plan := plan.push { mv with hyps := ← hypsOf f, part := none }
+      let mv := assumptions[i]!
+      let some f := mv.part | continue
+      let hyps ← hypsOf f
+      -- An assumption that no fact follows from and that occurs in the line is used to rewrite it.
+      let supplies := factHyps.any fun h => hyps.any fun d => h.value.containsFVar d.fvarId
+      let occurs := (a.find? fun e => acNorm e == acNorm f).isSome
+      if assumptionsRewrite || (suppliersRewrite && !supplies && occurs) then
+        plan := plan.push { mv with hyps, part := none }
     | 2 =>
       if suppliersRewrite then
         let (text, f) := facts[i]!
@@ -1681,15 +1785,6 @@ partial def checkStep (hintText : String) (hintStx : Syntax := .missing) : Tacti
   if plan.isEmpty && !renamed then throwError "the hint {hint} names no theorem, assumption or fact to apply"
 
   unless acOnly do
-    let s ← saveState
-    let byAC ← (pure (← closeByRfl) <||> closeByAC)
-    s.restore
-    let eq ← closeStep
-    s.restore
-    if byAC || (eq && facts.isEmpty) then
-      unsolved.restore
-      throwError "the two lines are already equal, up to order, grouping and integer cancellation, so {hint} is not applied. A trivial step is justified by \{Identity}, \{Commutativity} or \{Associativity}"
-
     if eq && plan.all (·.laws.isEmpty) then
       if ← closeStep then return
   if acOnly then
@@ -1697,6 +1792,9 @@ partial def checkStep (hintText : String) (hintStx : Syntax := .missing) : Tacti
     if plan.isEmpty then
       unsolved.restore
       throwError "`Dummy Renaming` changes only the name of a dummy, and the two lines differ in more"
+    if ← plan.allM (annotationDefinition? ·.item) then
+      unsolved.restore
+      throwError "with {hint}, a name is only replaced by its formula, and the two lines differ in more. Justify the other changes in a step of their own"
 
   let citedItems := assumptions.toList.map (·.item) ++ facts.toList.map fun (t, _) => "Arithmetic: " ++ t
   let mut seen : Array Expr := #[a]
@@ -1795,15 +1893,6 @@ syntax (name := lawTac) "law " term,+ : tactic
     unless t.isIdent do throwErrorAt t "`law` takes the names of theorems, `law Commutativity`"
     names := names.push t.getId.toString
   checkStep (", ".intercalate names.toList)
-
-partial def proofOf (leaves : Array (Expr × Expr)) (a : Expr) : MetaM (Option Expr) := do
-  for (pf, ty) in leaves do
-    if ← isDefEq ty a then return some pf
-  if let some (x, y) := a.app2? ``And then
-    if let some px ← proofOf leaves x then
-      if let some py ← proofOf leaves y then
-        return some (mkApp4 (mkConst ``And.intro) x y px py)
-  return none
 
 syntax (name := ptAssumeTac) "pt_assume " "[" term,* "]" : tactic
 @[tactic ptAssumeTac] def evalPtAssume : Tactic := fun stx => withMainContext do

@@ -10,5 +10,6 @@ import PT.Step
 import PT.HintParser
 import PT.Syntax
 import PT.Program
+import PT.Procedure
 import PT.Completion
 import PT.Status
