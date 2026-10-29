@@ -783,7 +783,7 @@ structure Smaller where
 
 /-- Find a proper part decided independently, by cited assumptions, or by its context.
 Exclude the conclusion and its conjuncts, which may follow from the antecedents. -/
-partial def smallerFact (e : Expr) (hide : Array FVarId) (useAssumptions : Bool)
+partial def smallerFact (e : Expr) (hide : Array FVarId) (useAssumptions : Bool) (cited : List Expr)
     (ctx : Array Expr := #[]) (whole : Bool := true) (conclusion : Bool := false)
     (listOk : Bool := true) : TacticM (Option Smaller) := do
   let e := normTF e
@@ -806,11 +806,13 @@ partial def smallerFact (e : Expr) (hide : Array FVarId) (useAssumptions : Bool)
     if let some (holds, byAssumptions) ← decide #[] e then
       return some { part := e, holds, byAssumptions, isRel := false }
   let go (e : Expr) (ctx : Array Expr) (whole conclusion : Bool) :=
-    smallerFact e hide useAssumptions ctx whole conclusion false
+    smallerFact e hide useAssumptions cited ctx whole conclusion false
   if isAnd || e.isAppOfArity ``Or 2 then
     let op := if isAnd then ``And else ``Or
     (leaves op e).findSomeM? fun l => go l ctx false (conclusion && isAnd)
   else if let some (a, b) := e.iff? then
+    -- with a cited assumption as one side, the other side is the smaller fact
+    let (a, b) := if cited.any (normTF · == normTF a) then (b, a) else (a, b)
     match ← go a ctx false false with
     | some r => pure (some r)
     | none => go b ctx false false
@@ -939,14 +941,14 @@ def propTautology (e : Expr) (hide : Array FVarId := #[]) (ctx : Array Expr := #
 def notOneLaw (text : String) (f : Expr) (cited : List (String × Expr)) (assumed : Array FVarId)
     (needed : Bool) : TacticM (Option MessageData) := do
   forallTelescope f fun _ body => do
-    if let some sm ← smallerFact body assumed needed then
+    let citedF := cited.map (·.2)
+    if let some sm ← smallerFact body assumed needed citedF then
       return some (← smallerMessage text sm (cited.map (·.1)))
     if let some msg ← redundantPart body assumed needed then
       return some (m!"the arithmetic fact `{text}` is two facts, " ++ msg)
     if !arithShape body then
       return some m!"the arithmetic fact `{text}` is not one law of arithmetic: a relation, an equation with a single relation on one side, or an implication from relations to a relation, as in appendix 4. Handle its other connectives with the laws of logic, in steps of their own"
 
-    let citedF := cited.map (·.2)
     let conj (fs : List Expr) : Expr := match fs with
       | [] => mkConst ``True
       | c :: cs => cs.foldl (fun acc d => mkApp2 (mkConst ``And) acc d) c
