@@ -647,11 +647,12 @@ partial def proofOf (leaves : Array (Expr × Expr)) (a : Expr) : MetaM (Option E
         return some (mkApp4 (mkConst ``And.intro) x y px py)
   return none
 
-/-- Descend through a shared connective or binder into the single part that changes. -/
-def zoomIn : TacticM Bool := do
+/-- Descend through a shared connective or binder into the parts that change. Their goals are
+returned and put before the other goals. -/
+def zoomIn : TacticM (List MVarId) := do
   let s ← saveState
   let ty ← instantiateMVars (← getMainTarget)
-  let some (a, b) := ty.iff? | return false
+  let some (a, b) := ty.iff? | return []
   let sameHead (n : Name) (k : Nat) := a.isAppOfArity n k && b.isAppOfArity n k
   let lem? : Option Name :=
     if sameHead ``And 2 then some ``and_congr
@@ -663,9 +664,9 @@ def zoomIn : TacticM Bool := do
     else if sameHead ``PT.Ex 3 then some ``PT.Ex.congr
     else if sameHead ``PT.wp 4 then some ``PT.wp_congr
     else none
-  let some lem := lem? | return false
+  let some lem := lem? | return []
   try
-    let goal ← getMainGoal
+    let goal :: rest ← getUnsolvedGoals | return []
     let gs ← goal.apply (← mkConstWithFreshMVarLevels lem)
     let mut remaining := []
     for g in gs do
@@ -673,7 +674,7 @@ def zoomIn : TacticM Bool := do
       setGoals [g]
       if ← focusMain do evalTactic (← `(tactic| intros; with_reducible rfl)) then continue
       remaining := remaining ++ [g]
-    if remaining.isEmpty then s.restore; return false
+    if remaining.isEmpty then s.restore; return []
     setGoals remaining
     if lem == ``PT.Forall.congr || lem == ``PT.Ex.congr then
       let body := a.getArg! 2
@@ -685,10 +686,12 @@ def zoomIn : TacticM Bool := do
       let post := a.getArg! 2
       let x := if post.isLambda then post.bindingName! else `σ
       evalTactic (← `(tactic| intro $(mkIdent x):ident))
-    return true
+    let parts ← getGoals
+    setGoals (parts ++ rest)
+    return parts
   catch _ =>
     s.restore
-    return false
+    return []
 
 /-! ## Arithmetic -/
 
@@ -1433,11 +1436,12 @@ partial def applyMove (mv : Move) (srcs : Array Src) (close : Option (TacticM Bo
   | some f =>
     if depth == 0 then return some f
     let s ← saveState
-    if ← zoomIn then
+    let parts ← zoomIn
+    if !parts.isEmpty then
 
       let gs ← getGoals
       let mut inner : Option Fail := none
-      for g in gs do
+      for g in parts do
         let s' ← saveState
         setGoals ([g] ++ gs.filter (· != g))
         match ← applyMove mv srcs close sc seen (depth - 1) with
