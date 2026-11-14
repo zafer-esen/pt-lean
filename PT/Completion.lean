@@ -7,12 +7,17 @@ set_option pt.strict false
 
 namespace PT
 
-def hintItems (range : Range) (maxSec : Nat := 0) : Array CompletionItem := Id.run do
+def hintItems (uri : DocumentUri) (pos : Lsp.Position) (range : Range) (maxSec : Nat := 0) : Array CompletionItem := Id.run do
+  -- Every completion item must carry `data?` with the document URI so that the server can
+  -- route `completionItem/resolve` requests back to the right file worker.  Without it, the
+  -- client's resolve request panics in `CompletionItem.getFileSource!`.
+  let data := toJson ({ uri, pos : ResolvableCompletionItemData })
   let mut out := #[]
   let mk (label detail : String) (kind : CompletionItemKind) (sort : Nat) : CompletionItem :=
     { label, detail? := some detail, kind? := some kind,
       sortText? := some (toString (100 + sort)),      -- keep appendix order
-      textEdit? := some { newText := label, insert := range, replace := range } }
+      textEdit? := some { newText := label, insert := range, replace := range },
+      data? := some data }
   for e in hintTable, i in [0:hintTable.length] do
     unless inSections maxSec e do continue
     out := out.push (mk e.name e.number .constant (3 * i))
@@ -40,7 +45,8 @@ def currentItem (typed : String) : Option String := Id.run do
 
 def hintCompletion (p : CompletionParams) (prev : RequestTask CompletionList)
     : RequestM (RequestTask CompletionList) := do
-  let text := (← RequestM.readDoc).meta.text
+  let doc ← RequestM.readDoc
+  let text := doc.meta.text
   let line := linePrefix text p.position
   let parts := line.splitOn "{"
   if parts.length < 2 then return prev
@@ -53,7 +59,7 @@ def hintCompletion (p : CompletionParams) (prev : RequestTask CompletionList)
 
   RequestM.withWaitFindSnapAtPos p.position fun snap => do
     let maxSec := pt.sections.get snap.cmdState.scopes.head!.opts
-    return { isIncomplete := false, items := hintItems ⟨start, p.position⟩ maxSec }
+    return { isIncomplete := false, items := hintItems doc.meta.uri p.position ⟨start, p.position⟩ maxSec }
 
 end PT
 
